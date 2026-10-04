@@ -7,7 +7,7 @@ import { bandFor, gymLoad, gymVolume, plyoLoad, plyoSetsDone, prescribedContacts
 import { incrementKg, type Units } from './profile';
 import { fatigueFor, recommendProgression, type Recommendation } from './progression';
 import { e1rm, headlinePRs } from './records';
-import type { ISODate, LoadBand, PersonalRecord, SessionInstance, SetLog } from './types';
+import type { ISODate, LoadBand, PersonalRecord, SessionInstance, SetLog, WorkoutInstance } from './types';
 import { sum } from './util';
 
 const working = (sets: SetLog[]) => sets.filter((s) => s.kind === 'working');
@@ -31,6 +31,23 @@ export function exerciseHistory(instances: SessionInstance[], exerciseId: string
     if (!working(sets).length) return [];
     const notes = ex.map((e) => e.notes).filter(Boolean).join(' · ');
     return [{ instanceId: i.id, date: i.date, templateName: i.templateName, sets, notes: notes || undefined }];
+  });
+}
+
+/** Today's open or planned gym session that trains this exercise, if any. */
+export function liveExercise(instances: SessionInstance[], exerciseId: string, today: ISODate) {
+  const inst = instances.find((x): x is WorkoutInstance => x.kind === 'gym' && x.date === today && (x.status === 'active' || x.status === 'planned') && x.exercises.some((e) => e.exerciseId === exerciseId && e.status !== 'removed'));
+  return inst && { inst, ex: inst.exercises.find((e) => e.exerciseId === exerciseId)! };
+}
+
+/** Apex's next recommendation for a lift: from the last session's working sets, with today's prescription and fatigue when it's on today's plan. */
+export function nextProgression(history: ExerciseSession[], live: ReturnType<typeof liveExercise>, exerciseId: string, units: Units = 'kg'): Recommendation {
+  const meta = gymExercise(exerciseId);
+  return recommendProgression({
+    repRange: live?.ex.prescribed.repRange ?? meta.repRange,
+    increment: incrementKg(meta.increment, units),
+    previous: history[0] ? working(history[0].sets) : [],
+    fatigue: live ? fatigueFor(live.inst.decision, meta) : undefined,
   });
 }
 

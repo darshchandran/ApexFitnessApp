@@ -88,6 +88,16 @@ export const stepIn = (incrementKg: number, u: Units = 'kg') => (u === 'lb' ? (i
 /** The same step back in kg, so progression adds whole plates in the athlete's units. */
 export const incrementKg = (incrementKgValue: number, u: Units = 'kg') => (u === 'lb' ? stepIn(incrementKgValue, u) / LB_PER_KG : incrementKgValue);
 
+/** A stored kg weight as a number in the athlete's units: 61.235 kg → "135" lb. */
+export function wt(kg: number, u: Units) {
+  const v = toUnits(kg, u);
+  return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString('en-GB') : `${+v.toFixed(u === 'lb' ? 1 : 2)}`;
+}
+export const wtu = (kg: number, u: Units) => `${wt(kg, u)} ${u}`;
+
+/** Engine text ("Keep 61.24 kg", "82.5 kg × 8") in the athlete's units. */
+export const localize = (text: string, u: Units) => (u === 'kg' ? text : text.replace(/(\d+(?:\.\d+)?) kg\b/g, (_, n: string) => wtu(Number(n), u)));
+
 // ---------- times ----------
 
 const SLOT_HOUR: Record<TimeSlot, number> = { morning: 8, midday: 12, afternoon: 15, evening: 19 };

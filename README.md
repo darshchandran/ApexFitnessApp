@@ -59,6 +59,27 @@ invalid numbers are rejected; the rest timer is stored on the session (wall-cloc
 saved data is backed up under `apex:v1:corrupt:*` and reset instead of crashing; a failed write shows
 a retry banner and the next write rewrites everything.
 
+## AI backend (Phase 5A)
+
+A separate server — the app never contains the OpenAI key and doesn't call it yet.
+
+```bash
+cp .env.example .env    # OPENAI_API_KEY, APEX_AI_MODEL (+ optional APEX_FAST_MODEL / APEX_DEEP_MODEL), APEX_AUTH_SECRET
+npm run ai:server       # POST http://127.0.0.1:8787/ai/chat
+```
+
+```
+backend/server.ts      node:http → handleChat
+backend/ai/handler.ts  auth (signed bearer token) → rate limit → validation → AIService
+backend/ai/service.ts  OpenAI Responses API loop (store: false), tool-round/call caps, deadline, safe errors, text-only conversation memory
+backend/ai/tools.ts    12 read-only tools + propose_log_basketball (drafts a confirmable action, executes nothing)
+backend/ai/data.ts     the device's own data, sent with the request, checked like stored data, frozen, never kept
+backend/ai/schemas.ts  strict tool schemas, request/response contract, action-confirmation contract, error codes
+backend/ai/prompts.ts  versioned instructions
+```
+
+Tools call the existing services/domain (`todayOverview`, `progressOverview`, logbook, volume…) — no training logic is duplicated, and APEX's engine stays authoritative. Request: `{ conversation_id?, message, mode?, context?: { today, athlete_data } }`; response: `{ conversation_id, message, model, prompt_version, tools_used, action_required }`.
+
 ## Not in this phase
 
 Progress photos, lb units, cloud sync (persistence is behind `KeyValueStore` so a sync layer can wrap it), drag-to-reorder (↑/↓ buttons instead).

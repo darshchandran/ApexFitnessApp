@@ -235,11 +235,8 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
         state = { ...state, saveError: true };
         return { data: undefined, recovered: [], needsFullWrite: false };
       });
-      const seed = seedData(clock());
-      const merged = loaded ? { ...seed, ...loaded } : seed;
-      // older data: basketball times on the plan and flat "other" days become schedule items
-      const migrated = migrateAthleteContext(merged);
-      state = { ...state, ready: true, recovered, data: migrated ?? merged };
+      const { data: hydrated, migrated } = hydrate(loaded, clock());
+      state = { ...state, ready: true, recovered, data: hydrated };
       if ((!loaded && !state.saveError) || full || (migrated && loaded)) await api.retrySave();
       refreshToday();
       emit();
@@ -767,6 +764,15 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
 }
 
 export type Apex = ReturnType<typeof createApex>;
+
+/** Loaded collections over the defaults, older layouts migrated — what the app runs on. */
+export function hydrate(loaded: Partial<ApexData> | undefined, now: Date) {
+  const seed = seedData(now);
+  const merged = loaded ? { ...seed, ...loaded } : seed;
+  // older data: basketball times on the plan and flat "other" days become schedule items
+  const migrated = migrateAthleteContext(merged);
+  return { data: migrated ?? merged, migrated: !!migrated };
+}
 
 // ---------- read models shared by screens ----------
 

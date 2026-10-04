@@ -4,10 +4,7 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { gymExercise, MUSCLE_LABEL } from '@/domain/catalog';
-import { exerciseHistory } from '@/domain/logbook';
-import { incrementKg } from '@/domain/profile';
-import { fatigueFor, recommendProgression } from '@/domain/progression';
-import type { WorkoutInstance } from '@/domain/types';
+import { exerciseHistory, liveExercise, nextProgression } from '@/domain/logbook';
 import { apex, useApex } from '@/services/useApex';
 import { ExerciseBests, ExerciseGraph, ExerciseHistoryList, fmtEffort, fmtSet } from '@/ui/exercise';
 import { repRange, restLabel, shortDate } from '@/ui/format';
@@ -31,15 +28,11 @@ export default function ExerciseDetail() {
 
   // today's open or planned session with this exercise, if any
   const today = apex.today();
-  const live = useMemo(() => {
-    const i = data.instances.find((x): x is WorkoutInstance => x.kind === 'gym' && x.date === today && (x.status === 'active' || x.status === 'planned') && x.exercises.some((e) => e.exerciseId === id && e.status !== 'removed'));
-    return i && { inst: i, ex: i.exercises.find((e) => e.exerciseId === id)! };
-  }, [data.instances, id, today]);
+  const live = useMemo(() => liveExercise(data.instances, id, today), [data.instances, id, today]);
 
   const last = history[0];
   const lastWorking = last?.sets.filter((s) => s.kind === 'working') ?? [];
-  const repTarget = live?.ex.prescribed.repRange ?? meta.repRange;
-  const rec = recommendProgression({ repRange: repTarget, increment: incrementKg(meta.increment, u), previous: lastWorking, fatigue: live ? fatigueFor(live.inst.decision, meta) : undefined });
+  const rec = nextProgression(history, live, id, u);
   const top = lastWorking.length ? Math.max(...lastWorking.map((s) => s.weight)) : 0;
   const todaySets = live?.ex.sets ?? [];
 
