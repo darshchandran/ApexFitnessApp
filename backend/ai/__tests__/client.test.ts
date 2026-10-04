@@ -6,9 +6,8 @@ import type { ApexData, WorkoutInstance } from '../../../src/domain/types';
 import { createAssistant, NOTE, type ApexMessage } from '../../../src/services/ai';
 import { todayOverview } from '../../../src/services/apex';
 import { bball } from '../../../src/test-utils';
-import { ActionStore } from '../actions';
 import { route, type ChatDeps } from '../handler';
-import { callTool, device, NOW, res, say, snapshot, testClock, testDeps, TODAY, token, week, type Body } from '../test-utils';
+import { callTool, device, NOW, res, say, snapshot, testActions, testClock, testDeps, TODAY, week, type Body } from '../test-utils';
 
 type Device = Awaited<ReturnType<typeof device>>;
 const lastRole = (b: Body) => (b.input as Record<string, unknown>[]).at(-1)?.role;
@@ -40,7 +39,7 @@ async function phone(deps: ChatDeps, app?: Device, opts: { now?: () => Date } = 
     },
   });
   await ai.init();
-  await ai.connect('http://apex.test', token());
+  await ai.connect('http://apex.test');
   return { ai, app: athlete, sent, net };
 }
 const lastAction = (ai: Awaited<ReturnType<typeof phone>>['ai']) => {
@@ -56,7 +55,7 @@ describe('the app client and the Phase 5B backend', () => {
     expect(await ai.send('What is my current training load?')).toBe(true);
     expect(ai.getState().messages.at(-1)).toMatchObject({ role: 'apex', text: 'Your load today is low.', checked: ['training load'] });
     await ai.send('And this week?');
-    expect(sent[1].body.conversation_id).toBe(ai.getState().conversationId);
+    expect(sent.filter((x) => x.path === '/ai/chat')[1].body.conversation_id).toBe(ai.getState().conversationId);
     expect(bodies[2].input.slice(0, 2)).toEqual([{ role: 'user', content: 'What is my current training load?' }, { role: 'assistant', content: 'Your load today is low.' }]);
     expect(snapshot(app)).toEqual(before);
   });
@@ -113,7 +112,7 @@ describe('the app client and the Phase 5B backend', () => {
 
   it('expired: by the server (410) or already past on the phone (no request at all)', async () => {
     const clock = testClock();
-    const { deps } = testDeps(proposer('propose_log_basketball', BASKETBALL), { actions: new ActionStore(5 * 60_000, clock.now) });
+    const { deps } = testDeps(proposer('propose_log_basketball', BASKETBALL), { actions: testActions({ clock: clock.now }) });
     const { ai, app } = await phone(deps);
     await ai.send('Log basketball for 90 minutes at RPE 8.');
     clock.advance(5 * 60_000);
@@ -166,15 +165,18 @@ describe('the app client and the Phase 5B backend', () => {
     expect(sent.filter((s) => s.path.endsWith('/confirm'))).toHaveLength(0);
   });
 
-  it('a refused token on confirm leaves the action pending and asks to reconnect', async () => {
+  it('when this device can no longer sign in, the action stays pending and nothing runs', async () => {
     const { deps } = testDeps(proposer('propose_log_basketball', BASKETBALL));
-    const { ai, app } = await phone(deps);
+    const { ai, app, sent } = await phone(deps);
     await ai.send('Log basketball for 90 minutes at RPE 8.');
-    await ai.connect('http://apex.test', 'v1.not-a-valid-token.sig');
+    // the server rotates its signing secret, revokes this device and stops registering new ones
+    deps.secret = 'a-completely-different-signing-secret-0123456789';
+    await deps.db.query('update ai_refresh_tokens set revoked_at = now() where identity_id in (select identity_id from ai_actions where id = $1)', [lastAction(ai).action.id]);
+    deps.registration = 'closed';
     await ai.confirm(lastAction(ai).id);
-    expect(lastAction(ai).action).toMatchObject({ state: 'pending', note: NOTE.reconnect });
-    expect(ai.getState().authFailed).toBe(true);
+    expect(lastAction(ai).action).toMatchObject({ state: 'pending', note: NOTE.unavailable });
     expect(snapshot(app).basketball).toHaveLength(0);
+    expect(sent.filter((x) => x.path.endsWith('/confirm'))).toHaveLength(1); // refused before anything ran
     expect(NOW.getDate()).toBe(7);
   });
 });

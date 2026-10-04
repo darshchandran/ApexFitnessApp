@@ -9,5 +9,5 @@ export default function AIScreen() {
   useEffect(() => {
     void startAssistant();
   }, []);
-  return <ApexAI assistant={assistant} today={apex.today()} onBack={goBack} />;
+  return <ApexAI assistant={assistant} today={apex.today()} onBack={goBack} allowServerEntry={__DEV__} />;
 }

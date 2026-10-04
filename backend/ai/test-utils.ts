@@ -4,12 +4,15 @@ import { memoryStore, writeAll } from '../../src/data/store';
 import type { ApexData } from '../../src/domain/types';
 import { createApex } from '../../src/services/apex';
 import { bball, completedGym, freshData } from '../../src/test-utils';
-import { ActionStore } from './actions';
-import { DEFAULT_LIMITS, loadAIConfig, type AILimits } from './config';
+import { spawn } from 'node:child_process';
+import { join } from 'node:path';
+import { migrate, pgDb, type Db } from '../db/db';
+import { DEFAULT_LIMITS, loadAIConfig, type AILimits, type Environment } from './config';
 import { snapshotSource, type AthleteDataSource } from './data';
 import type { ChatDeps } from './handler';
-import { RateLimiter, signToken, type AILogEvent } from './security';
+import { signToken, type AILogEvent } from './security';
 import { AIService, type ResponsesClient } from './service';
+import { ActionStore, RateLimits } from './store';
 
 export const NOW = new Date(2026, 9, 7, 18); // Wed 7 Oct 2026, 18:00 — Legs on the program
 export const TODAY = '2026-10-07';
@@ -89,7 +92,49 @@ export const testClock = () => {
   return c;
 };
 
-export function testService(script: Script, limits: Partial<AILimits> = {}, actions = new ActionStore()) {
+// ---------- the test database (a real Postgres started by Jest's global setup) ----------
+
+/** Starts this worker's own Postgres (PGlite, see backend/db/test-postgres.mjs) and returns its URL. */
+function startWorkerPostgres(): Promise<string> {
+  const child = spawn(process.execPath, [join(__dirname, '..', 'db', 'test-postgres.mjs')], { stdio: ['ignore', 'pipe', 'inherit', 'ipc'] });
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('test Postgres did not start')), 60_000);
+    child.stdout!.on('data', (d) => {
+      const m = /APEX_TEST_DATABASE_URL=(\S+)/.exec(String(d));
+      if (!m) return;
+      clearTimeout(timer);
+      child.stdout!.destroy();
+      child.unref(); // it stops by itself when this worker goes away (the IPC channel closes)
+      (child as unknown as { channel?: { unref(): void } }).channel?.unref();
+      resolve(m[1]);
+    });
+    child.on('exit', (code) => reject(new Error(`test Postgres exited (${code})`)));
+  });
+}
+
+let shared: Promise<Db> | undefined;
+/**
+ * A real Postgres for each test worker, through one connection (PGlite serves one session at a
+ * time). Concurrent requests in a test are queued on it — the exactly-once logic lives in the
+ * conditional UPDATEs, so it is exercised all the same.
+ */
+export const testDb = () =>
+  (shared ??= (async () => {
+    const db = pgDb(process.env.APEX_TEST_DATABASE_URL ?? (await startWorkerPostgres()), { max: 1, idleMs: 250 });
+    await migrate(db);
+    return db;
+  })());
+
+/** A Db that waits for the shared test database — lets fixtures stay synchronous. */
+export const lazyDb = (p: Promise<Db> = testDb()): Db => ({
+  query: async (sql, params) => (await p).query(sql, params),
+  tx: async (fn) => (await p).tx(fn),
+  close: async () => undefined,
+});
+
+export const testActions = (opts: ConstructorParameters<typeof ActionStore>[1] = {}) => new ActionStore(lazyDb(), opts);
+
+export function testService(script: Script, limits: Partial<AILimits> = {}, actions = testActions()) {
   const logs: AILogEvent[] = [];
   const { client, bodies } = fakeClient(script);
   const config = loadAIConfig({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'test-model', APEX_FAST_MODEL: 'test-fast' }, { ...DEFAULT_LIMITS, ...limits });
@@ -97,12 +142,14 @@ export function testService(script: Script, limits: Partial<AILimits> = {}, acti
   return { ai, bodies, logs, config, actions };
 }
 
-export function testDeps(script: Script, opts: { limits?: Partial<AILimits>; data?: AthleteDataSource; actions?: ActionStore } = {}) {
+/** Rate-limit keys get a fresh namespace per fixture, so tests sharing the database don't share limits. */
+let fixture = 0;
+export function testDeps(script: Script, opts: { limits?: Partial<AILimits>; data?: AthleteDataSource; actions?: ActionStore; env?: Environment; registration?: 'open' | 'closed' } = {}) {
   const { ai, bodies, logs, config, actions } = testService(script, opts.limits, opts.actions);
+  const db = lazyDb();
   const deps: ChatDeps = {
-    secret: SECRET, ai, actions, limiter: new RateLimiter(config.limits.requestsPerWindow, config.limits.windowMs),
-    actionLimiter: new RateLimiter(100, config.limits.windowMs),
-    data: opts.data ?? snapshotSource, logger: (e) => logs.push(e), limits: config.limits, now: () => NOW,
+    env: opts.env ?? 'production', secret: SECRET, ai, db, actions, rate: new RateLimits(db, `t${process.pid}-${Date.now()}-${fixture++}:`),
+    registration: opts.registration ?? 'open', data: opts.data ?? snapshotSource, logger: (e) => logs.push(e), limits: config.limits, now: () => NOW,
   };
   return { deps, bodies, logs, actions };
 }

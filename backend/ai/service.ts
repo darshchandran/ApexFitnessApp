@@ -3,7 +3,7 @@
 import type { Response as ModelResponse, ResponseCreateParamsNonStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses';
 import { toResponseInputItems } from 'openai/lib/responses/ResponseInputItems';
 import type { ApexData, ISODate } from '../../src/domain/types';
-import { ActionStore, clientAction } from './actions';
+import { clientAction, type ActionStore } from './store';
 import type { AIConfig, ModelMode } from './config';
 import { INSTRUCTIONS, PROMPT_VERSION } from './prompts';
 import { AIError, type AIMessageResponse } from './schemas';
@@ -51,6 +51,8 @@ export interface ChatInput {
   mode: ModelMode;
   data: Readonly<ApexData> | null;
   today: ISODate;
+  /** Request-scoped logger (carries the request id). */
+  log?: AILogger;
 }
 
 export interface ChatResult extends AIMessageResponse {
@@ -89,10 +91,10 @@ export class AIService {
   readonly conversations: ConversationStore;
   readonly actions: ActionStore;
 
-  constructor(private deps: { client: ResponsesClient; config: AIConfig; logger?: AILogger; conversations?: ConversationStore; actions?: ActionStore; now?: () => number }) {
+  constructor(private deps: { client: ResponsesClient; config: AIConfig; actions: ActionStore; logger?: AILogger; conversations?: ConversationStore; now?: () => number }) {
     this.log = deps.logger ?? consoleLogger;
     this.conversations = deps.conversations ?? new ConversationStore(deps.config.limits.historyTurns);
-    this.actions = deps.actions ?? new ActionStore();
+    this.actions = deps.actions;
   }
 
   model(mode: ModelMode) {
@@ -101,6 +103,7 @@ export class AIService {
 
   async respond(chat: ChatInput): Promise<ChatResult> {
     const { limits } = this.deps.config;
+    const log = chat.log ?? this.log;
     const now = this.deps.now ?? Date.now;
     const model = this.model(chat.mode);
     const input: ResponseInputItem[] = [
@@ -115,7 +118,7 @@ export class AIService {
 
     try {
       for (let rounds = 0; ; rounds++) {
-        const res = await this.call(model, input, abort, deadline - now(), chat.userId);
+        const res = await this.call(model, input, abort, deadline - now(), chat.userId, log);
         const calls = res.output.filter(isCall);
         if (!calls.length) {
           const text = textOf(res);
@@ -123,25 +126,25 @@ export class AIService {
           this.conversations.add(chat.userId, chat.conversationId, [{ role: 'user', content: chat.message }, { role: 'assistant', content: text }], now());
           // only a proposal from a turn that finished is kept — it waits for the athlete, bound to them
           const draft = ctx.proposals.at(-1);
-          const action = draft && this.actions.create(draft, chat.userId, chat.conversationId);
+          const action = draft ? await this.actions.create(draft, chat.userId, chat.conversationId) : undefined;
           return {
             conversation_id: chat.conversationId, message: text, model, prompt_version: PROMPT_VERSION,
             tools_used: [...used], action_required: !!action, action: action ? clientAction(action) : null, rounds,
           };
         }
         if (rounds >= limits.maxToolRounds) throw new AIError('tool_limit');
-        if (!calls.every(wellFormed)) throw this.malformed(model);
+        if (!calls.every(wellFormed)) throw this.malformed(model, log);
         try {
           input.push(...toResponseInputItems(res.output));
         } catch {
-          throw this.malformed(model); // an output item the SDK can't replay
+          throw this.malformed(model, log); // an output item the SDK can't replay
         }
         for (const [k, call] of calls.entries()) {
           const t0 = now();
           const result = k < limits.maxToolCallsPerRound ? await runTool(call.name, call.arguments, ctx) : { ok: false as const, error: 'call_limit' };
           const known = TOOL_NAMES.has(call.name);
           if (known) used.add(call.name);
-          this.log({ event: 'ai.tool', tool: known ? call.name : 'unknown', ok: result.ok, ...(!result.ok && { error: result.error }), ms: now() - t0 });
+          log({ event: 'ai.tool', tool: known ? call.name : 'unknown', ok: result.ok, ...(!result.ok && { error: result.error }), ms: now() - t0 });
           input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result.ok ? result.output : { error: result.error, ...('detail' in result && { detail: result.detail }) }) });
         }
         if (abort.signal.aborted) throw new AIError('timeout');
@@ -151,7 +154,7 @@ export class AIService {
     }
   }
 
-  private async call(model: string, input: ResponseInputItem[], abort: AbortController, remainingMs: number, userId: string): Promise<ModelResponse> {
+  private async call(model: string, input: ResponseInputItem[], abort: AbortController, remainingMs: number, userId: string, log: AILogger): Promise<ModelResponse> {
     if (remainingMs <= 0 || abort.signal.aborted) throw new AIError('timeout');
     let res: ModelResponse;
     try {
@@ -171,15 +174,15 @@ export class AIService {
       );
     } catch (e) {
       const err = abort.signal.aborted ? new AIError('timeout') : classify(e);
-      this.log({ event: 'ai.model_error', category: err.category, model });
+      log({ event: 'ai.model_error', category: err.category, model });
       throw err;
     }
-    if (!res || !Array.isArray(res.output) || res.status === 'failed') throw this.malformed(model);
+    if (!res || !Array.isArray(res.output) || res.status === 'failed') throw this.malformed(model, log);
     return res;
   }
 
-  private malformed(model: string) {
-    this.log({ event: 'ai.model_error', category: 'malformed_response', model });
+  private malformed(model: string, log: AILogger) {
+    log({ event: 'ai.model_error', category: 'malformed_response', model });
     return new AIError('model_error', 'malformed_response');
   }
 }

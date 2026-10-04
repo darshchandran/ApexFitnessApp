@@ -1,4 +1,4 @@
-// node:http → the AI routes (Request/Response). Used by server.ts and the integration test.
+// node:http → the AI routes (Request/Response). Used by server.ts and the integration tests.
 import { createServer, type IncomingMessage } from 'node:http';
 import { route, type ChatDeps } from './ai/handler';
 
@@ -6,10 +6,21 @@ const notFound = JSON.stringify({ error: { code: 'not_found', message: 'Not foun
 const tooLarge = JSON.stringify({ error: { code: 'payload_too_large', message: 'That request is too large.' } });
 
 /**
- * `corsOrigins`: browser origins allowed to call the API (the web build). Native apps don't send an
- * Origin and need none. Empty by default — a browser on any other site gets no CORS headers.
+ * The client address for per-address limits (registration, refresh). Without a trusted proxy it is
+ * the socket's peer — headers can't change it. Behind one (APEX_TRUST_PROXY=1) it is the address the
+ * proxy appended last to X-Forwarded-For; anything earlier in that header came from the client.
  */
-export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[] } = {}) => {
+export function clientAddress(req: IncomingMessage, trustProxy: boolean) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (trustProxy && typeof forwarded === 'string' && forwarded.trim()) return forwarded.split(',').at(-1)!.trim();
+  return req.socket.remoteAddress ?? 'unknown';
+}
+
+/**
+ * `corsOrigins`: exact browser origins allowed to call the API (the web build). Native apps send no
+ * Origin and need none. Empty = no browser origin is allowed.
+ */
+export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[], trustProxy = false } = {}) => {
   const cors = (req: IncomingMessage): Record<string, string> => {
     const origin = req.headers.origin;
     return origin && corsOrigins.includes(origin) ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
@@ -35,7 +46,11 @@ export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[] } 
     }
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers.set(k, v);
-    const out = await route(new Request(`http://localhost${req.url}`, { method: req.method, headers, body: req.method === 'POST' ? Buffer.concat(chunks) : undefined }), deps);
+    const out = await route(
+      new Request(`http://localhost${req.url}`, { method: req.method, headers, body: req.method === 'POST' ? Buffer.concat(chunks) : undefined }),
+      deps,
+      { clientIp: clientAddress(req, trustProxy) },
+    );
     res.writeHead(out.status, { ...Object.fromEntries(out.headers), ...cors(req) }).end(await out.text());
   });
 };

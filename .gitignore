@@ -45,3 +45,6 @@ example
 # local env + build output (never commit secrets)
 .env
 build/
+
+# local development database (APEX AI)
+.data/

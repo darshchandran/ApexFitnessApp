@@ -1,9 +1,11 @@
 // APEX AI on the device: a small client for the APEX AI backend (never OpenAI — the key lives on
-// the server) and one bounded conversation kept on this device. Actions the athlete confirms come
-// back as records and are stored through the app's own service (applyActionChanges).
-// Nothing here logs — no tokens, no athlete data, no message text.
+// the server) and one bounded conversation kept on this device. The install signs itself in
+// (aiSession.ts: refresh token in secure storage, short-lived access token in memory). Actions the
+// athlete confirms come back as records and are stored through the app's own service
+// (applyActionChanges). Nothing here logs — no tokens, no athlete data, no message text.
 import type { KeyValueStore } from '../data/store';
 import type { ApexData, ISODate } from '../domain/types';
+import { createSession, memorySecrets, SessionError, type SecretStore } from './aiSession';
 import type { ActionChanges } from './apex';
 
 export type Mode = 'fast' | 'default' | 'deep';
@@ -19,7 +21,8 @@ export const CONNECTION_KEY = 'apex:v1:ai-connection';
 
 export interface Connection {
   url: string;
-  token: string;
+  /** Entered on the device (development builds only) rather than built in. */
+  custom: boolean;
 }
 
 export type ActionState = 'pending' | 'confirming' | 'cancelling' | 'executed' | 'cancelled' | 'expired' | 'failed';
@@ -66,7 +69,7 @@ export interface AIState {
   mode: Mode;
   messages: Message[];
   sending: boolean;
-  /** The server refused the access token: ask for a new one. */
+  /** This device couldn't sign in to APEX AI (the server refused it even after a refresh). */
   authFailed: boolean;
 }
 
@@ -89,7 +92,7 @@ export const NOTE = {
   cancelled: 'Cancelled — nothing was changed.',
   offline: 'Couldn’t reach APEX AI. Nothing has changed on this device — try again.',
   unavailable: 'APEX AI couldn’t confirm this right now. Nothing has changed on this device.',
-  reconnect: 'Your APEX AI access was refused. Reconnect, then confirm again.',
+  reconnect: 'APEX AI couldn’t sign in on this device. Try again, then confirm.',
 };
 
 const DONE: Record<string, (a: ProposedAction) => string> = {
@@ -127,7 +130,7 @@ function readChat(j: unknown) {
 const validChanges = (c: unknown): c is ActionChanges => isObj(c) && Array.isArray(c.basketball) && Array.isArray(c.instances);
 
 class RequestFailed extends Error {
-  constructor(public kind: 'offline' | 'timeout' | 'http' | 'malformed', public status = 0, public body?: unknown) {
+  constructor(public kind: 'offline' | 'timeout' | 'http' | 'malformed' | 'signin', public status = 0, public body?: unknown) {
     super(kind);
   }
 }
@@ -138,7 +141,10 @@ export function chatError(e: unknown): { text: string; retry: boolean } {
   if (e.kind === 'offline') return { text: 'Couldn’t reach APEX AI. Check your connection and try again.', retry: true };
   if (e.kind === 'timeout') return { text: 'APEX AI took too long to answer. Try again.', retry: true };
   if (e.kind === 'malformed') return { text: 'APEX AI sent a reply this app couldn’t read. Try again.', retry: true };
-  if (e.status === 401) return { text: 'Your APEX AI access was refused. Reconnect to continue.', retry: false };
+  if (e.kind === 'signin') return e.body === 'closed'
+    ? { text: 'APEX AI isn’t open to new devices right now.', retry: false }
+    : { text: 'APEX AI couldn’t sign in right now. Try again.', retry: true };
+  if (e.status === 401) return { text: 'APEX AI couldn’t sign in on this device.', retry: false };
   if (e.status === 429) return { text: 'That’s a lot of questions in a short time. Try again in a few minutes.', retry: true };
   if (e.status === 413) return { text: 'Your training data is too large to send right now.', retry: false };
   if (e.status >= 400 && e.status < 500) return { text: 'That message couldn’t be sent. Try rephrasing it.', retry: false };
@@ -176,12 +182,16 @@ export function createAssistant(deps: {
   store: KeyValueStore;
   apex: ApexLink;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Where the refresh token lives: the device's secure store (memory on web and in tests). */
+  secrets?: SecretStore;
   defaultUrl?: string;
   now?: () => Date;
   timeouts?: { chat?: number; action?: number };
 }) {
   const now = deps.now ?? (() => new Date());
   const doFetch = deps.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const session = createSession({ secrets: deps.secrets ?? memorySecrets(), fetch: doFetch, now: () => now().getTime() });
+  const builtInUrl = (deps.defaultUrl ?? '').trim().replace(/\/+$/, '');
   const listeners = new Set<() => void>();
   let state: AIState = { ready: false, connection: null, conversationId: null, mode: 'default', messages: [], sending: false, authFailed: false };
   /** Bumped by "new conversation": replies for an older conversation are dropped, never mixed in. */
@@ -212,17 +222,35 @@ export function createAssistant(deps: {
   };
   const expired = (a: ProposedAction) => Date.parse(a.expiresAt) <= now().getTime();
 
+  /** One authorized request; a refused access token is refreshed once and the request sent again. */
   async function call(path: string, body: unknown, timeoutMs: number) {
     const c = state.connection;
     if (!c) throw new RequestFailed('http', 401);
+    const token = async () => {
+      try {
+        return await session.token(c.url);
+      } catch (e) {
+        if (e instanceof SessionError) throw e.kind === 'offline' ? new RequestFailed('offline') : new RequestFailed('signin', 0, e.kind);
+        throw e;
+      }
+    };
+    let r = await request(c.url, path, body, await token(), timeoutMs);
+    if (r.status === 401) {
+      session.invalidate();
+      r = await request(c.url, path, body, await token(), timeoutMs);
+    }
+    return r;
+  }
+
+  async function request(url: string, path: string, body: unknown, token: string, timeoutMs: number) {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), timeoutMs);
     try {
       let res: Response;
       try {
-        res = await doFetch(`${c.url}${path}`, {
+        res = await doFetch(`${url}${path}`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json', authorization: `Bearer ${c.token}` },
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
           body: JSON.stringify(body),
           signal: abort.signal,
         });
@@ -285,32 +313,43 @@ export function createAssistant(deps: {
       ]);
       const restored = stored(conv);
       if (conv && !restored) await deps.store.removeItem(CONVERSATION_KEY).catch(() => undefined); // unreadable: start clean
-      let connection: Connection | null = null;
+      let custom: string | null = null;
       try {
         const c = conn ? JSON.parse(conn) : null;
-        if (isObj(c) && str(c.url, 300) && str(c.token, 2000)) connection = { url: c.url, token: c.token };
+        if (isObj(c) && str(c.url, 300) && /^https?:\/\//.test(c.url)) custom = c.url;
+        // earlier builds kept a pasted access token here in plain storage: drop it
+        if (isObj(c) && 'token' in c) await deps.store.setItem(CONNECTION_KEY, JSON.stringify(custom ? { url: custom } : {}));
       } catch {
-        // unreadable connection: ask again
+        // unreadable: fall back to the built-in server
       }
+      const connection = custom ? { url: custom, custom: true } : builtInUrl ? { url: builtInUrl, custom: false } : null;
       set({ ready: true, connection, ...(restored ?? {}) });
     },
 
-    /** The server address (pre-filled from the build) for the connect form. */
-    defaultUrl: (deps.defaultUrl ?? '').replace(/\/+$/, ''),
+    /** The server address built into the app (EXPO_PUBLIC_APEX_AI_URL), if any. */
+    defaultUrl: builtInUrl,
 
-    async connect(url: string, token: string) {
+    /** Development builds only: use an APEX AI server entered on the device. No credentials are entered. */
+    async connect(url: string) {
       const u = url.trim().replace(/\/+$/, '');
-      const t = token.trim();
-      if (!/^https?:\/\/[^\s/]+/.test(u) || !/^[\w.-]{10,2000}$/.test(t)) return false;
-      const connection = { url: u, token: t };
-      set({ connection, authFailed: false });
-      await deps.store.setItem(CONNECTION_KEY, JSON.stringify(connection)).catch(() => undefined);
+      if (!/^https?:\/\/[^\s/]+$/.test(u)) return false;
+      set({ connection: { url: u, custom: true }, authFailed: false });
+      await deps.store.setItem(CONNECTION_KEY, JSON.stringify({ url: u })).catch(() => undefined);
       return true;
     },
 
+    /** Signs this device out of the server and forgets an entered server address. */
     async disconnect() {
-      set({ connection: null, authFailed: false });
+      const c = state.connection;
+      if (c) await session.signOut(c.url).catch(() => undefined);
+      set({ connection: builtInUrl ? { url: builtInUrl, custom: false } : null, authFailed: false });
       await deps.store.removeItem(CONNECTION_KEY).catch(() => undefined);
+    },
+
+    /** After a sign-in failure: try again with a fresh sign-in on the next request. */
+    retrySignIn() {
+      session.invalidate();
+      set({ authFailed: false });
     },
 
     setMode(mode: Mode) {
@@ -376,7 +415,8 @@ export function createAssistant(deps: {
         return patchAction(messageId, { state: 'pending', note: NOTE.unavailable });
       } catch (e) {
         // the request may or may not have reached the server; confirming again is safe (it runs once there)
-        return patchAction(messageId, { state: 'pending', note: e instanceof RequestFailed && e.kind === 'malformed' ? NOTE.unavailable : NOTE.offline });
+        const kind = e instanceof RequestFailed ? e.kind : 'offline';
+        return patchAction(messageId, { state: 'pending', note: kind === 'offline' || kind === 'timeout' ? NOTE.offline : NOTE.unavailable });
       }
     },
 

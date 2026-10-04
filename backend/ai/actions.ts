@@ -3,13 +3,14 @@
 // the athlete's data, so what the athlete confirms is what the engine does. Nothing here computes
 // training numbers, and every run is checked: only new basketball and today's unstarted sessions
 // may change — never templates, the profile, completed sessions or past basketball.
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { memoryStore, writeAll } from '../../src/data/store';
 import { adaptationStatus, planVsActual } from '../../src/domain/logbook';
 import type { ApexData, ISODate, Level, SessionInstance } from '../../src/domain/types';
 import { daysBetween, parseISODate, toISODate } from '../../src/domain/util';
 import { createApex, todayOverview, type ActionChanges, type Apex } from '../../src/services/apex';
 import { BASKETBALL_TYPES, check, ISO_DATE, S, type Schema } from './schemas';
+import type { StoredAction } from './store';
 
 export type ActionType = 'log_basketball' | 'adapt_today_workout' | 'log_gym_set' | 'start_workout' | 'finish_workout' | 'update_athlete_profile';
 /** confirmed = accepted and executing (exactly one execution can be in flight). */
@@ -272,69 +273,8 @@ export type ActionResult =
   | { success: true; action_id: string; action_type: ActionType; result: Record<string, unknown> & { changes: ActionChanges }; affected_entities: Affected[]; timestamp: string }
   | { success: false; action_id: string; action_type: ActionType; error: { code: string; message: string }; timestamp: string };
 
-export interface StoredAction extends ActionDraft {
-  id: string;
-  /** The authenticated athlete who was shown the proposal — the only one who can confirm or cancel it. */
-  userId: string;
-  conversationId: string;
-  argumentsHash: string;
-  requires_confirmation: true;
-  status: ActionStatus;
-  createdAt: number;
-  expiresAt: number;
-  execution?: Promise<ActionResult>;
-  result?: ActionResult;
-}
-
-/** What the app sees: no athlete id, no internal fingerprints. */
-export const clientAction = (a: StoredAction) => ({
-  id: a.id, type: a.type, summary: a.summary, arguments: a.arguments, preview: a.preview, requires_confirmation: a.requires_confirmation,
-  status: a.status, created_at: new Date(a.createdAt).toISOString(), expires_at: new Date(a.expiresAt).toISOString(),
-});
-export type ClientAction = ReturnType<typeof clientAction>;
-
-export const argumentsHash = (type: ActionType, args: Args) => hash([type, args]);
-
-/**
- * Pending and recent actions. Ids are random UUIDs; lookups are scoped to the athlete, so another
- * athlete's id is indistinguishable from a missing one.
- * ponytail: in-process memory — pending actions die with a restart (they expire in minutes anyway); a table keyed by action id when there is more than one server.
- */
-export class ActionStore {
-  private map = new Map<string, StoredAction>();
-  constructor(readonly ttlMs = 5 * 60_000, private clock: () => number = Date.now, private keepMs = 24 * 3_600_000, private max = 10_000) {}
-
-  create(draft: ActionDraft, userId: string, conversationId: string): StoredAction {
-    const now = this.clock();
-    this.prune(now);
-    const a: StoredAction = {
-      ...draft, id: randomUUID(), userId, conversationId, argumentsHash: argumentsHash(draft.type, draft.arguments),
-      requires_confirmation: true, status: 'pending', createdAt: now, expiresAt: now + this.ttlMs,
-    };
-    this.map.set(a.id, a);
-    return a;
-  }
-
-  find(id: string, userId: string): StoredAction | undefined {
-    const a = this.map.get(id);
-    if (!a || a.userId !== userId) return undefined;
-    this.expire(a);
-    return a;
-  }
-
-  /** A pending action past its expiry can never run. */
-  expire(a: StoredAction) {
-    if (a.status === 'pending' && this.clock() >= a.expiresAt) a.status = 'expired';
-  }
-
-  private prune(now: number) {
-    for (const [id, a] of this.map) if (now - a.createdAt > this.keepMs) this.map.delete(id);
-    while (this.map.size >= this.max) this.map.delete(this.map.keys().next().value!);
-  }
-}
-
 /** The deterministic line shown after a confirm — the model is not called again. */
-export function resultMessage(a: StoredAction, r: ActionResult) {
+export function resultMessage(a: Pick<StoredAction, 'type' | 'summary'>, r: ActionResult) {
   if (!r.success) return `${a.type === 'log_basketball' ? 'Basketball was not logged' : 'Nothing was changed'}: ${r.error.message}`;
   const sessions = (r.result.today_sessions as { prescribed: string }[]).map((s) => s.prescribed);
   return [a.type === 'log_basketball' ? 'Basketball logged.' : 'Done.', a.summary, ...(sessions.length ? [`Today: ${sessions.join('; ')}.`] : [])].join(' ');

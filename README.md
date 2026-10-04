@@ -59,30 +59,39 @@ invalid numbers are rejected; the rest timer is stored on the session (wall-cloc
 saved data is backed up under `apex:v1:corrupt:*` and reset instead of crashing; a failed write shows
 a retry banner and the next write rewrites everything.
 
-## AI backend (Phase 5A)
+## AI backend
 
-A separate server — the app never contains the OpenAI key and doesn't call it yet.
+A separate server (`backend/`) — the app never contains the OpenAI key or any server secret.
 
 ```bash
-cp .env.example .env    # OPENAI_API_KEY, APEX_AI_MODEL (+ optional APEX_FAST_MODEL / APEX_DEEP_MODEL), APEX_AUTH_SECRET
-npm run ai:server       # POST http://127.0.0.1:8787/ai/chat, /ai/actions/:id/confirm|cancel
+cp .env.example .env    # APEX_ENV=development, APEX_AUTH_SECRET (+ OPENAI_API_KEY, APEX_AI_MODEL to enable chat)
+npm run ai:server       # http://127.0.0.1:8787 — a local Postgres (PGlite) in .data/ai-db unless DATABASE_URL is set
+npm run ai:migrate      # apply supabase/migrations to DATABASE_URL (the server also applies them on start)
+npm run ai:token -- dev_athlete 1   # DEVELOPMENT ONLY: a dev1 token for curl; refused by production servers
 ```
 
 ```
-backend/server.ts      node:http → handleChat
-backend/ai/handler.ts  auth (signed bearer token) → rate limit → validation → AIService
-backend/ai/service.ts  OpenAI Responses API loop (store: false), tool-round/call caps, deadline, safe errors, text-only conversation memory
-backend/ai/tools.ts    12 read-only tools + propose_log_basketball (drafts a confirmable action, executes nothing)
-backend/ai/data.ts     the device's own data, sent with the request, checked like stored data, frozen, never kept
-backend/ai/schemas.ts  strict tool schemas, request/response contract, action-confirmation contract, error codes
-backend/ai/prompts.ts  versioned instructions
+backend/server.ts       config (production guards) → Postgres → migrations → HTTP
+backend/http.ts         node:http adapter: exact-origin CORS, observed client address
+backend/ai/handler.ts   routes: /ai/auth/register|refresh|revoke, /ai/chat, /ai/actions/:id/confirm|cancel; request ids
+backend/ai/auth.ts      per-install athlete identity: 15-min access tokens, rotating refresh tokens (hashed, reuse revokes)
+backend/ai/store.ts     persistent actions (exactly-once via conditional UPDATEs) and per-athlete rate limits, in Postgres
+backend/ai/service.ts   OpenAI Responses API loop (store: false), tool-round/call caps, deadline, safe errors
+backend/ai/tools.ts     12 read-only tools + propose tools for enabled actions (nothing executes from the model)
+backend/ai/actions.ts   action contracts; preview/execution through the app's own service on a private copy
+backend/db/             pg driver, migrator; local.ts / test-postgres.mjs = PGlite for development and tests only
+supabase/migrations/    the schema (RLS on, closed to Supabase's anon/authenticated roles)
 ```
 
-In the app: **APEX AI** (chat icon in the Home header → `src/app/ai.tsx`, UI in `src/ui/ai.tsx`, client in `src/services/ai.ts`). It talks only to the APEX AI server; the first time, enter the server address (or build with `EXPO_PUBLIC_APEX_AI_URL`) and an access token — until APEX has accounts, mint one on the server with `npm run ai:token -- <athlete-id> [days]`. The conversation is kept on the device under its own bounded key; confirmed actions are stored with `apex.applyActionChanges()`. The web build needs its origin in `APEX_AI_CORS_ORIGINS`.
+**Identity.** APEX has no account system yet, so each install registers its own athlete identity (`POST /ai/auth/register`): the refresh token is stored in the device's secure storage (Keychain/Keystore via expo-secure-store; session-only on web), the access token lives in memory for 15 minutes, and the athlete is always the `sub` of a verified token — never a request field. Registration is rate-limited per address and in total, and can be closed with `APEX_AI_REGISTRATION=closed`. When APEX gets real accounts, their tokens replace registration.
 
-Actions (`backend/ai/actions.ts`): the model can only *propose* (`log_basketball`, `adapt_today_workout`; other contracts defined but disabled). `POST /ai/actions/:id/confirm` runs the stored proposal once through the app's own service on a copy of the device's data and returns `ActionChanges`, which the app stores with `apex.applyActionChanges()` (idempotent by record id); `POST /ai/actions/:id/cancel` cancels. Proposals are bound to the athlete and expire after 5 minutes. **Known limitation:** pending and executed actions live in server memory — a restart drops them (a stale confirm gets 404 and can't execute); use a shared store before running more than one server.
+**Actions.** The model can only *propose* (`log_basketball`, `adapt_today_workout`; other contracts are defined but disabled). Proposals are stored in Postgres, bound to the athlete, and expire after 5 minutes. `POST /ai/actions/:id/confirm` claims the action in the database (exactly one request can), runs the stored proposal once through the app's own service, records the result, and every later confirm — on any instance, after any restart — gets that same result. The app stores it with `apex.applyActionChanges()` (idempotent by record id).
 
-Tools call the existing services/domain (`todayOverview`, `progressOverview`, logbook, volume…) — no training logic is duplicated, and APEX's engine stays authoritative. Request: `{ conversation_id?, message, mode?, context?: { today, athlete_data } }`; response: `{ conversation_id, message, model, prompt_version, tools_used, action_required }`.
+**In the app:** APEX AI (chat icon in the Home header). Production builds set `EXPO_PUBLIC_APEX_AI_URL` (an address, not a secret); development builds without it can enter a server address. Nobody types a token. The web build's origin must be listed in `APEX_AI_CORS_ORIGINS`.
+
+**Production checklist:** `APEX_ENV=production`, a real `OPENAI_API_KEY`, `APEX_AI_MODEL`, a random `APEX_AUTH_SECRET`, `DATABASE_URL` (Supabase: the server/service connection, `DATABASE_SSL=require`), `APEX_AI_CORS_ORIGINS` (https origins or `none`), `APEX_AI_REGISTRATION`, and `APEX_TRUST_PROXY=1` only behind a proxy that sets X-Forwarded-For. Build the app with `EXPO_PUBLIC_APEX_AI_URL=https://…`.
+
+Conversation memory (a few recent text turns) is kept in each server's memory on purpose — no conversation text is stored; with several instances a conversation may lose earlier context, never data.
 
 ## Not in this phase
 

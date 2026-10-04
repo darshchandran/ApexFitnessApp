@@ -1,12 +1,13 @@
 import { describe, expect, it } from '@jest/globals';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { AIConfigError, DEFAULT_LIMITS, loadAIConfig } from '../config';
+import { AIConfigError, DEFAULT_LIMITS, loadAIConfig, loadServerConfig } from '../config';
 import type { AthleteDataSource } from '../data';
-import { createChatDeps, handleChat } from '../handler';
-import { RateLimiter, signToken, verifyToken } from '../security';
+import { createDeps, handleChat } from '../handler';
+import { signToken, verifyToken } from '../security';
+import { RateLimits } from '../store';
 import { AIService } from '../service';
-import { API_KEY, athleteData, callTool, fakeClient, NOW, post, res, say, SECRET, TODAY, testDeps, token, toolOutputs, trainedAthlete } from '../test-utils';
+import { API_KEY, athleteData, callTool, fakeClient, NOW, post, res, say, SECRET, TODAY, testDeps, token, toolOutputs, trainedAthlete, lazyDb, testActions } from '../test-utils';
 
 const ROOT = join(__dirname, '..', '..', '..');
 const ok = () => say('Fine.');
@@ -33,27 +34,30 @@ describe('configuration', () => {
 
   it('the service picks the model for the requested mode', async () => {
     const { client, bodies } = fakeClient(ok);
-    const ai = new AIService({ client, config: loadAIConfig({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'main-1', APEX_DEEP_MODEL: 'big-1' }), logger: () => undefined });
+    const ai = new AIService({ client, config: loadAIConfig({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'main-1', APEX_DEEP_MODEL: 'big-1' }), logger: () => undefined, actions: testActions() });
     await ai.respond({ userId: 'u1', conversationId: 'c1', message: 'hi', mode: 'deep', data: null, today: TODAY });
     expect(bodies[0].model).toBe('big-1');
     expect(ai.model('fast')).toBe('main-1');
   });
 
-  it('without a key the endpoint answers ai_unavailable — after authenticating — and logs only the variable name', async () => {
+  it('development without a key: the endpoint answers ai_unavailable — after authenticating — and logs no values', async () => {
     const logs: string[] = [];
-    const deps = createChatDeps({ APEX_AUTH_SECRET: SECRET, APEX_AI_MODEL: 'm' }, () => fakeClient(ok).client, (e) => logs.push(JSON.stringify(e)));
+    const deps = createDeps(loadServerConfig({ APEX_ENV: 'development', APEX_AUTH_SECRET: SECRET }), lazyDb(), () => fakeClient(ok).client, (e) => logs.push(JSON.stringify(e)));
+    deps.now = () => NOW;
     expect(deps.ai).toBeNull();
-    expect(logs[0]).toContain('OPENAI_API_KEY is not set');
+    expect(logs[0]).toContain('chat is unavailable');
+    expect(logs.join()).not.toContain(SECRET);
     const denied = await handleChat(post({ message: 'hi' }, null), deps);
     expect(denied.status).toBe(401);
-    const res = await handleChat(post({ message: 'hi' }, signToken('u1', SECRET, 60)), deps);
+    const res = await handleChat(post({ message: 'hi' }, signToken('u1', SECRET, 60, NOW.getTime())), deps);
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ error: { code: 'ai_unavailable', message: expect.stringContaining('not affected') } });
   });
 
-  it('without an auth secret every request is refused (fail closed)', async () => {
-    const deps = createChatDeps({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'm', APEX_AUTH_SECRET: 'too-short' }, () => fakeClient(ok).client, () => undefined);
-    expect(deps.secret).toBeUndefined();
+  it('without an auth secret every request is refused (fail closed) — and such a config never loads', async () => {
+    expect(() => loadServerConfig({ APEX_ENV: 'development', APEX_AUTH_SECRET: 'too-short' })).toThrow(/APEX_AUTH_SECRET/);
+    const { deps } = testDeps(ok);
+    deps.secret = undefined;
     expect((await handleChat(post({ message: 'hi' }, signToken('u1', 'too-short', 60)), deps)).status).toBe(503);
   });
 });
@@ -156,10 +160,10 @@ describe('the endpoint', () => {
     expect(limited.status).toBe(429);
     expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
     expect((await handleChat(post({ message: '1' }, token('someone_else')), deps)).status).toBe(200);
-    const rl = new RateLimiter(1, 1000);
-    expect(rl.take('u', 0)).toBe(0);
-    expect(rl.take('u', 500)).toBe(500);
-    expect(rl.take('u', 1000)).toBe(0); // new window
+    const rl = new RateLimits(lazyDb(), `unit-${Date.now()}:`);
+    expect(await rl.take('u', 1, 1000, 0)).toBe(0);
+    expect(await rl.take('u', 1, 1000, 500)).toBe(500);
+    expect(await rl.take('u', 1, 1000, 1000)).toBe(0); // new window
   });
 
   it('maps every failure to a structured, user-safe error', async () => {
@@ -210,7 +214,7 @@ describe('architecture boundary', () => {
       expect(s).not.toMatch(/OPENAI_API_KEY|APEX_AUTH_SECRET|EXPO_PUBLIC_[A-Z_]*(OPENAI|AI_KEY|API_KEY|SECRET|TOKEN)/);
     }
     // the app's AI client and screen never log (tokens, athlete data, messages)
-    for (const f of ['src/services/ai.ts', 'src/services/useAI.ts', 'src/ui/ai.tsx', 'src/app/ai.tsx']) {
+    for (const f of ['src/services/ai.ts', 'src/services/aiSession.ts', 'src/services/useAI.ts', 'src/ui/ai.tsx', 'src/app/ai.tsx']) {
       expect(readFileSync(join(ROOT, f), 'utf8')).not.toMatch(/console\./);
     }
     // the only build-time AI setting is the server address

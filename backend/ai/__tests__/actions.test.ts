@@ -3,12 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { planVsActual } from '../../../src/domain/logbook';
 import type { ApexData, WorkoutInstance } from '../../../src/domain/types';
 import { todayOverview, type ActionChanges } from '../../../src/services/apex';
-import { ACTIONS, ActionRejected, ActionStore, simulate, type ActionResult, type ClientAction } from '../actions';
+import { ACTIONS, ActionRejected, simulate, type ActionResult } from '../actions';
+import type { ActionStore, ClientAction } from '../store';
 import { handleChat, route, type ChatDeps } from '../handler';
 import { bball } from '../../../src/test-utils';
-import { callTool, device, NOW, post, res, say, snapshot, testClock, testDeps, TODAY, token, toolOutputs, week, type Body } from '../test-utils';
+import { callTool, device, NOW, post, res, say, snapshot, testActions, testClock, testDeps, TODAY, token, toolOutputs, week, type Body } from '../test-utils';
 
 type Device = Awaited<ReturnType<typeof device>>;
+type Store = ActionStore;
 type Ok = Extract<ActionResult, { success: true }>;
 type Confirmed = { action: ClientAction; result: Ok & { result: Record<string, any> & { changes: ActionChanges } }; message: string; error?: { code: string } };
 const lastRole = (b: Body) => (b.input as Record<string, unknown>[]).at(-1)?.role;
@@ -19,7 +21,7 @@ const proposer = (tool: string, args: object) => (b: Body) =>
 
 const BASKETBALL = { duration_min: 90, rpe: 8, session_type: null, lower_body_fatigue: null, date: null };
 
-function setup(tool = 'propose_log_basketball', args: object = BASKETBALL, opts: { actions?: ActionStore } = {}) {
+function setup(tool = 'propose_log_basketball', args: object = BASKETBALL, opts: { actions?: Store } = {}) {
   return testDeps(proposer(tool, args), opts);
 }
 
@@ -97,10 +99,10 @@ describe('proposals', () => {
   it('is bound to the athlete who saw it, and expires', async () => {
     const app = await device();
     const clock = testClock();
-    const { deps, actions } = setup(undefined, undefined, { actions: new ActionStore(5 * 60_000, clock.now) });
+    const { deps, actions } = setup(undefined, undefined, { actions: testActions({ clock: clock.now }) });
     const { action } = await propose(deps, app);
-    expect(actions.find(action!.id, 'athlete_1')).toMatchObject({ userId: 'athlete_1', conversationId: 'conv1', status: 'pending' });
-    expect(actions.find(action!.id, 'athlete_2')).toBeUndefined();
+    expect(await actions.get(action!.id, 'athlete_1')).toMatchObject({ userId: 'athlete_1', conversationId: 'conv1', status: 'pending' });
+    expect(await actions.get(action!.id, 'athlete_2')).toBeUndefined();
     clock.advance(5 * 60_000);
     const r = await confirm(deps, action!.id, app);
     expect(r.status).toBe(410);
@@ -206,10 +208,10 @@ describe('confirmation', () => {
     const { deps, actions } = setup();
     for (const type of ['update_athlete_profile', 'log_gym_set', 'start_workout', 'finish_workout'] as const) {
       expect(ACTIONS[type].enabled).toBe(false);
-      const a = actions.create({ type, arguments: {}, summary: 'x', preview: [] }, 'athlete_1', 'conv1');
+      const a = await actions.create({ type, arguments: {}, summary: 'x', preview: [] }, 'athlete_1', 'conv1');
       const r = await confirm(deps, a.id, app);
-      expect([r.status, r.body.error?.code, a.status]).toEqual([403, 'action_not_allowed', 'failed']);
-      expect((await confirm(deps, a.id, app)).status).toBe(409);
+      expect([r.status, r.body.error?.code, (await actions.get(a.id, 'athlete_1'))!.status]).toEqual([403, 'action_not_allowed', 'failed']);
+      expect((await confirm(deps, a.id, app)).status).toBe(403); // settled for good: never retried into an execution
     }
     expect(snapshot(app).profile.goal).toBe('performance');
   });
@@ -220,7 +222,7 @@ describe('confirmation', () => {
     const out = await propose(deps, app);
     expect(toolOutputs(bodies[1])).toEqual([{ error: 'unknown_tool' }, { error: 'unknown_tool' }]);
     expect(out.action).toBeNull();
-    expect(actions.find(randomUUID(), 'athlete_1')).toBeUndefined();
+    expect(await actions.get(randomUUID(), 'athlete_1')).toBeUndefined();
   });
 });
 

@@ -9,12 +9,12 @@ import { todayOverview, type ActionChanges } from '../../../src/services/apex';
 import type { ApexData, WorkoutInstance } from '../../../src/domain/types';
 import { bball } from '../../../src/test-utils';
 import { createAIServer } from '../../http';
-import { ActionStore, type ClientAction } from '../actions';
-import { loadAIConfig } from '../config';
-import { createChatDeps, type ChatDeps } from '../handler';
+import { loadAIConfig, loadServerConfig } from '../config';
+import { createDeps, type ChatDeps } from '../handler';
 import type { AILogEvent } from '../security';
 import { AIService, type ResponsesClient } from '../service';
-import { device, NOW, SECRET, snapshot, testClock, TODAY, token, week } from '../test-utils';
+import { RateLimits, type ActionStore, type ClientAction } from '../store';
+import { device, NOW, SECRET, snapshot, testClock, TODAY, token, week, lazyDb, testActions } from '../test-utils';
 
 /**
  * fetch over node:http. jest-expo swaps the global fetch for Expo's native-backed one, which makes
@@ -83,12 +83,15 @@ const mockOpenAI = createServer((req, res) => {
 const API_KEY = 'sk-mock-not-a-real-key';
 let openaiUrl = '';
 const logs: AILogEvent[] = [];
-const env = () => ({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'mock-model', APEX_AUTH_SECRET: SECRET });
+// development: the model is a local mock (production refuses mock endpoints and non-OpenAI keys)
+const env = () => ({ APEX_ENV: 'development', OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'mock-model', APEX_AUTH_SECRET: SECRET });
 const makeClient = (apiKey: string) => new OpenAI({ apiKey, baseURL: `${openaiUrl}/v1`, maxRetries: 0, fetch: nodeFetch }) as unknown as ResponsesClient;
 
-/** A fresh server process: new memory, as after a restart. `actions` swaps in a store with a test clock. */
+let instances = 0;
+/** A fresh server process on the shared database, as after a restart. `actions` swaps in a store with a test clock. */
 async function startApex(actions?: ActionStore) {
-  const deps: ChatDeps = createChatDeps(env(), makeClient, (e) => logs.push(e));
+  const deps: ChatDeps = createDeps(loadServerConfig(env()), lazyDb(), makeClient, (e) => logs.push(e));
+  deps.rate = new RateLimits(deps.db, `it-${Date.now()}-${instances++}:`);
   if (actions) {
     deps.actions = actions;
     deps.ai = new AIService({ client: makeClient(API_KEY), config: loadAIConfig(env()), logger: (e) => logs.push(e), actions });
@@ -261,7 +264,7 @@ describe('security over HTTP', () => {
 
   it('a disabled action type can’t execute', async () => {
     const app = await device();
-    const stored = apex.deps.actions.create({ type: 'update_athlete_profile', arguments: { field: 'goal', value: 'muscle' }, summary: 'x', preview: [] }, 'athlete_1', 'conv-1');
+    const stored = await apex.deps.actions.create({ type: 'update_athlete_profile', arguments: { field: 'goal', value: 'muscle' }, summary: 'x', preview: [] }, 'athlete_1', 'conv-1');
     const r = await confirm(apex.url, stored.id, app);
     expect([r.status, r.json.error.code]).toEqual([403, 'action_not_allowed']);
     expect(snapshot(app).profile.goal).toBe('performance');
@@ -280,7 +283,7 @@ describe('security over HTTP', () => {
 
   it('an expired action can’t execute', async () => {
     const clock = testClock();
-    const own = await startApex(new ActionStore(5 * 60_000, clock.now));
+    const own = await startApex(testActions({ clock: clock.now }));
     try {
       const app = await device();
       const a = await proposeBasketball(own.url, app);
@@ -293,24 +296,26 @@ describe('security over HTTP', () => {
   });
 });
 
-describe('restart (pending actions live in memory)', () => {
-  it('after a restart, pending proposals are gone and executed ones can’t run again', async () => {
+describe('restart (actions live in the database)', () => {
+  it('a proposal survives a restart and is confirmable; an executed one replays its result and never runs again', async () => {
     const app = await device();
     const first = await startApex();
     const pending = await proposeBasketball(first.url, app);
     const done = await proposeBasketball(first.url, app);
     const executed = await confirm(first.url, done.id, app);
-    app.applyActionChanges(changes(executed));
+    expect(executed.status).toBe(200);
     await close(first.server);
 
-    const second = await startApex(); // a new process: empty action store
+    const second = await startApex(); // a new process: nothing in memory, same database
     try {
-      for (const id of [pending.id, done.id]) {
-        const r = await confirm(second.url, id, app);
-        expect([r.status, r.json.error.code]).toEqual([404, 'not_found']);
-      }
-      expect(app.applyActionChanges(changes(executed))).toBe(0); // a client replaying the old result
-      expect(snapshot(app).basketball).toHaveLength(1);
+      const later = await confirm(second.url, pending.id, app);
+      expect([later.status, later.json.result.success]).toEqual([200, true]);
+      const replay = await confirm(second.url, done.id, app);
+      expect([replay.status, replay.json.result]).toEqual([200, executed.json.result]);
+      expect(app.applyActionChanges(changes(executed))).toBe(2);
+      expect(app.applyActionChanges(changes(replay))).toBe(0); // the old result again: no second mutation
+      app.applyActionChanges(changes(later));
+      expect(snapshot(app).basketball).toHaveLength(2); // the two proposals, once each
     } finally {
       await close(second.server);
     }
@@ -319,8 +324,9 @@ describe('restart (pending actions live in memory)', () => {
 
 describe('web build access (CORS)', () => {
   it('only allow-listed browser origins get CORS headers; native requests need none', async () => {
-    const deps = createChatDeps(env(), makeClient, () => undefined);
+    const deps = createDeps(loadServerConfig(env()), lazyDb(), makeClient, () => undefined);
     deps.now = () => NOW;
+    deps.rate = new RateLimits(deps.db, `cors-${Date.now()}:`);
     const server = createAIServer(deps, { corsOrigins: ['http://localhost:8081'] });
     const url = await listen(server);
     try {

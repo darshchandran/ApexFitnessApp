@@ -200,38 +200,41 @@ function Starters({ onPick, disabled }: { onPick: (t: string) => void; disabled:
 
 // ---------- connect ----------
 
-function Connect({ assistant, refused }: { assistant: Assistant; refused: boolean }) {
-  const s = assistant.getState();
-  const [url, setUrl] = useState(s.connection?.url ?? assistant.defaultUrl);
-  const [token, setToken] = useState('');
+/** Development builds without a built-in server: point the app at a local APEX AI server. No credentials. */
+function ServerSetup({ assistant }: { assistant: Assistant }) {
+  const [url, setUrl] = useState(assistant.defaultUrl);
   const [bad, setBad] = useState(false);
-  const submit = async () => setBad(!(await assistant.connect(url, token)));
+  const submit = async () => setBad(!(await assistant.connect(url)));
   return (
     <ScrollView contentContainerStyle={{ padding: GUTTER, gap: S.md }} keyboardShouldPersistTaps="handled">
-      <Txt v="overline">Connect APEX AI</Txt>
-      <Txt v="body" color={C.text2}>
-        {refused ? 'Your access was refused or has expired. Enter a new access token.' : 'APEX AI answers from the training data on this device. Enter your APEX AI server and access token.'}
-      </Txt>
-      <TextInput value={url} onChangeText={setUrl} placeholder="https://ai.example.com" placeholderTextColor={C.text3} autoCapitalize="none" autoCorrect={false}
-        keyboardType="url" style={styles.field} accessibilityLabel="APEX AI server address" />
-      <TextInput value={token} onChangeText={setToken} placeholder="Access token" placeholderTextColor={C.text3} autoCapitalize="none" autoCorrect={false}
-        secureTextEntry style={styles.field} accessibilityLabel="APEX AI access token" onSubmitEditing={submit} />
-      {bad && <Txt v="bodySm" color={C.danger}>Check the server address (http:// or https://) and the access token.</Txt>}
-      <Button label="Connect" onPress={submit} disabled={!url.trim() || !token.trim()} />
-      <Txt v="bodySm" color={C.text3}>The token stays on this device. Your OpenAI key never does — it lives only on the APEX AI server.</Txt>
+      <Txt v="overline">APEX AI server</Txt>
+      <Txt v="body" color={C.text2}>Development build: enter the APEX AI server to use. This device signs itself in — there is nothing else to enter.</Txt>
+      <TextInput value={url} onChangeText={setUrl} placeholder="http://localhost:8787" placeholderTextColor={C.text3} autoCapitalize="none" autoCorrect={false}
+        keyboardType="url" style={styles.field} accessibilityLabel="APEX AI server address" onSubmitEditing={submit} />
+      {bad && <Txt v="bodySm" color={C.danger}>Enter the server address, starting with http:// or https://.</Txt>}
+      <Button label="Use this server" onPress={submit} disabled={!url.trim()} />
     </ScrollView>
+  );
+}
+
+function Unavailable() {
+  return (
+    <View style={{ padding: GUTTER, gap: S.sm }}>
+      <Txt v="overline">APEX AI</Txt>
+      <Txt v="body" color={C.text2}>APEX AI isn’t available in this version of the app. Your training works as usual.</Txt>
+    </View>
   );
 }
 
 // ---------- screen ----------
 
-export function ApexAI({ assistant, today, onBack }: { assistant: Assistant; today: ISODate; onBack: () => void }) {
+export function ApexAI({ assistant, today, onBack, allowServerEntry = false }: { assistant: Assistant; today: ISODate; onBack: () => void; allowServerEntry?: boolean }) {
   const s = useSyncExternalStore(assistant.subscribe, assistant.getState, assistant.getState);
   const insets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const [modeOpen, setModeOpen] = useState(false);
   const list = useRef<ScrollView>(null);
-  const connected = !!s.connection && !s.authFailed;
+  const connected = !!s.connection;
   const canSend = connected && !s.sending && !!text.trim() && text.length <= MAX_MESSAGE;
 
   const send = async (t = text) => {
@@ -259,7 +262,7 @@ export function ApexAI({ assistant, today, onBack }: { assistant: Assistant; tod
       {!s.ready ? (
         <View style={{ flex: 1 }} />
       ) : !connected ? (
-        <Connect assistant={assistant} refused={s.authFailed} />
+        allowServerEntry ? <ServerSetup assistant={assistant} /> : <Unavailable />
       ) : (
         <>
           <ScrollView
@@ -285,6 +288,12 @@ export function ApexAI({ assistant, today, onBack }: { assistant: Assistant; tod
             {s.sending && <Thinking />}
           </ScrollView>
 
+          {s.authFailed ? (
+            <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, S.sm), alignItems: 'center' }]} accessibilityLiveRegion="polite">
+              <Txt v="bodySm" color={C.text2} style={{ flex: 1 }}>APEX AI couldn’t sign in on this device.</Txt>
+              <Button label="Try again" variant="secondary" size="md" onPress={() => assistant.retrySignIn()} />
+            </View>
+          ) : (
           <View style={[styles.composer, { paddingBottom: Math.max(insets.bottom, S.sm) }]}>
             <TextInput
               value={text}
@@ -313,6 +322,7 @@ export function ApexAI({ assistant, today, onBack }: { assistant: Assistant; tod
               {s.sending ? <ActivityIndicator size="small" color={C.text2} /> : <Icon name="arrow-up" size={22} color={canSend ? C.onAccent : C.text3} strokeWidth={2.2} />}
             </Pressable>
           </View>
+          )}
           {text.length > MAX_MESSAGE - 200 && <Txt v="bodySm" color={C.text3} style={styles.count}>{text.length}/{MAX_MESSAGE}</Txt>}
         </>
       )}
@@ -329,7 +339,9 @@ export function ApexAI({ assistant, today, onBack }: { assistant: Assistant; tod
               {s.mode === m && <Icon name="check" size={20} color={C.text} />}
             </Pressable>
           ))}
-          <Button label="Disconnect APEX AI" variant="secondary" size="md" onPress={() => { setModeOpen(false); void assistant.disconnect(); }} style={{ marginTop: S.md }} />
+          {s.connection?.custom && (
+            <Button label="Change server" variant="secondary" size="md" onPress={() => { setModeOpen(false); void assistant.disconnect(); }} style={{ marginTop: S.md }} />
+          )}
         </View>
       </BottomSheet>
     </KeyboardAvoidingView>

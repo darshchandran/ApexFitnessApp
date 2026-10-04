@@ -2,7 +2,7 @@
 // the confirmation contract for writes. Everything that crosses in from the model or the client is
 // checked here before it reaches APEX code.
 import type { ISODate } from '../../src/domain/types';
-import type { ClientAction } from './actions';
+import type { ClientAction } from './store';
 import type { AILimits, ModelMode } from './config';
 
 type SchemaType = 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object' | 'null';
@@ -152,7 +152,8 @@ export const confirmSchema = (): Schema => ({
 export type AIErrorCode =
   | 'unauthorized' | 'rate_limited' | 'invalid_request' | 'payload_too_large' | 'method_not_allowed' | 'not_found'
   | 'ai_unavailable' | 'timeout' | 'model_error' | 'tool_limit' | 'internal'
-  | 'action_expired' | 'action_cancelled' | 'action_not_pending' | 'arguments_changed' | 'action_not_allowed' | 'action_failed';
+  | 'action_expired' | 'action_cancelled' | 'action_not_pending' | 'arguments_changed' | 'action_not_allowed' | 'action_failed'
+  | 'action_in_progress' | 'registration_closed';
 
 const UNAFFECTED = 'Your workouts and training data are not affected.';
 export const ERRORS: Record<AIErrorCode, { status: number; message: string }> = {
@@ -173,7 +174,12 @@ export const ERRORS: Record<AIErrorCode, { status: number; message: string }> = 
   arguments_changed: { status: 409, message: 'That request changed after it was proposed, so it was cancelled. Ask again.' },
   action_not_allowed: { status: 403, message: 'That action isn’t available.' },
   action_failed: { status: 422, message: 'Nothing was changed.' },
+  action_in_progress: { status: 409, message: 'That request is being confirmed. Try again in a moment.' },
+  registration_closed: { status: 403, message: 'APEX AI isn’t open to new devices right now.' },
 };
+
+/** POST /ai/auth/refresh and /ai/auth/revoke. */
+export const refreshSchema = (): Schema => S.obj({ refresh_token: S.text('^rt_[A-Za-z0-9_-]{43}$') });
 
 export interface AIErrorBody {
   error: { code: AIErrorCode; message: string; detail?: string };

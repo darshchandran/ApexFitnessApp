@@ -1,4 +1,4 @@
-import { describe, expect, it, jest } from '@jest/globals';
+import { afterEach, describe, expect, it, jest } from '@jest/globals';
 import { Text, TextInput } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { act, create, type ReactTestInstance, type ReactTestRenderer } from 'react-test-renderer';
@@ -13,12 +13,16 @@ const TODAY = '2026-10-07';
 const metrics = { frame: { x: 0, y: 0, width: 375, height: 812 }, insets: { top: 0, left: 0, right: 0, bottom: 0 } };
 type Reply = { status?: number; body: unknown; wait?: Promise<void> } | 'offline' | 'hang';
 
-async function setup(replies: Reply[] = [], opts: { connected?: boolean; stored?: object } = {}) {
+async function setup(replies: Reply[] = [], opts: { connected?: boolean; stored?: object; allowServerEntry?: boolean } = {}) {
   const app = createApex(memoryStore(), () => NOW);
   await app.init();
   const calls: { path: string; body: Record<string, unknown> }[] = [];
   const fetch = jest.fn(async (url: string, init: RequestInit) => {
-    calls.push({ path: new URL(url).pathname, body: JSON.parse(String(init.body)) });
+    const path = new URL(url).pathname;
+    if (path.startsWith('/ai/auth/')) {
+      return new Response(JSON.stringify({ athlete_id: 'ath_ui', access_token: 'v1.ui.token', access_expires_at: new Date(NOW.getTime() + 900_000).toISOString(), refresh_token: `rt_${'u'.repeat(43)}`, refresh_expires_at: new Date(NOW.getTime() + 86_400_000).toISOString() }), { status: 201 });
+    }
+    calls.push({ path, body: JSON.parse(String(init.body)) });
     const r = replies.shift() ?? { body: { conversation_id: 'conv-1', message: 'ok' } };
     if (r === 'offline') throw new TypeError('Network request failed');
     if (r === 'hang') return new Promise<Response>(() => undefined);
@@ -26,15 +30,22 @@ async function setup(replies: Reply[] = [], opts: { connected?: boolean; stored?
     return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
   });
   const store = memoryStore(opts.stored ? { [CONVERSATION_KEY]: JSON.stringify(opts.stored) } : {});
-  const ai = createAssistant({ store, apex: app, fetch, now: () => NOW });
+  const ai = createAssistant({ store, apex: app, fetch, now: () => NOW, timeouts: { chat: 300, action: 300 } });
   await ai.init();
-  if (opts.connected !== false) await ai.connect('http://apex.test', 'v1.token-for-tests.signature');
+  if (opts.connected !== false) await ai.connect('http://apex.test');
   let r!: ReactTestRenderer;
   await act(async () => {
-    r = create(<SafeAreaProvider initialMetrics={metrics}><ApexAI assistant={ai} today={TODAY} onBack={() => undefined} /></SafeAreaProvider>);
+    // unmounted after each test: a card's expiry timer must not outlive it
+    r = create(<SafeAreaProvider initialMetrics={metrics}><ApexAI assistant={ai} today={TODAY} onBack={() => undefined} allowServerEntry={opts.allowServerEntry} /></SafeAreaProvider>);
   });
+  mounted.push(r);
   return { r, ai, app, calls };
 }
+
+const mounted: ReactTestRenderer[] = [];
+afterEach(async () => {
+  await act(async () => mounted.splice(0).forEach((m) => m.unmount()));
+});
 
 const textOf = (r: ReactTestRenderer) =>
   r.root.findAllByType(Text).map((t) => ([] as unknown[]).concat(t.props.children).filter((c) => typeof c === 'string' || typeof c === 'number').join('')).join('\n');
@@ -59,10 +70,13 @@ const executed = {
 };
 
 describe('APEX AI screen', () => {
-  it('asks to connect when there is no access yet — no token is built in', async () => {
-    const { r } = await setup([], { connected: false });
-    expect(textOf(r)).toContain('Connect APEX AI');
-    expect(r.root.findAllByType(TextInput).map((t) => t.props.accessibilityLabel)).toEqual(['APEX AI server address', 'APEX AI access token']);
+  it('no server in the build: production builds say so; development builds ask for a server address — never a token', async () => {
+    const prod = await setup([], { connected: false });
+    expect(textOf(prod.r)).toContain('APEX AI isn’t available in this version of the app.');
+    expect(prod.r.root.findAllByType(TextInput)).toHaveLength(0);
+    const dev = await setup([], { connected: false, allowServerEntry: true });
+    expect(textOf(dev.r)).toContain('APEX AI server');
+    expect(dev.r.root.findAllByType(TextInput).map((t) => t.props.accessibilityLabel)).toEqual(['APEX AI server address']);
   });
 
   it('empty: title, starter prompts; a starter sends right away and the starters make way for the conversation', async () => {
