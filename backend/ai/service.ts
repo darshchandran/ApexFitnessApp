@@ -3,6 +3,7 @@
 import type { Response as ModelResponse, ResponseCreateParamsNonStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses';
 import { toResponseInputItems } from 'openai/lib/responses/ResponseInputItems';
 import type { ApexData, ISODate } from '../../src/domain/types';
+import { ActionStore, clientAction } from './actions';
 import type { AIConfig, ModelMode } from './config';
 import { INSTRUCTIONS, PROMPT_VERSION } from './prompts';
 import { AIError, type AIMessageResponse } from './schemas';
@@ -86,10 +87,12 @@ function classify(e: unknown): AIError {
 export class AIService {
   private log: AILogger;
   readonly conversations: ConversationStore;
+  readonly actions: ActionStore;
 
-  constructor(private deps: { client: ResponsesClient; config: AIConfig; logger?: AILogger; conversations?: ConversationStore; now?: () => number }) {
+  constructor(private deps: { client: ResponsesClient; config: AIConfig; logger?: AILogger; conversations?: ConversationStore; actions?: ActionStore; now?: () => number }) {
     this.log = deps.logger ?? consoleLogger;
     this.conversations = deps.conversations ?? new ConversationStore(deps.config.limits.historyTurns);
+    this.actions = deps.actions ?? new ActionStore();
   }
 
   model(mode: ModelMode) {
@@ -118,9 +121,12 @@ export class AIService {
           const text = textOf(res);
           if (!text) throw new AIError('model_error', res.status === 'incomplete' ? 'incomplete_output' : 'empty_output');
           this.conversations.add(chat.userId, chat.conversationId, [{ role: 'user', content: chat.message }, { role: 'assistant', content: text }], now());
+          // only a proposal from a turn that finished is kept — it waits for the athlete, bound to them
+          const draft = ctx.proposals.at(-1);
+          const action = draft && this.actions.create(draft, chat.userId, chat.conversationId);
           return {
             conversation_id: chat.conversationId, message: text, model, prompt_version: PROMPT_VERSION,
-            tools_used: [...used], action_required: ctx.proposals.at(-1) ?? null, rounds,
+            tools_used: [...used], action_required: !!action, action: action ? clientAction(action) : null, rounds,
           };
         }
         if (rounds >= limits.maxToolRounds) throw new AIError('tool_limit');
@@ -130,14 +136,15 @@ export class AIService {
         } catch {
           throw this.malformed(model); // an output item the SDK can't replay
         }
-        calls.forEach((call, k) => {
+        for (const [k, call] of calls.entries()) {
           const t0 = now();
-          const result = k < limits.maxToolCallsPerRound ? runTool(call.name, call.arguments, ctx) : { ok: false as const, error: 'call_limit' };
+          const result = k < limits.maxToolCallsPerRound ? await runTool(call.name, call.arguments, ctx) : { ok: false as const, error: 'call_limit' };
           const known = TOOL_NAMES.has(call.name);
           if (known) used.add(call.name);
           this.log({ event: 'ai.tool', tool: known ? call.name : 'unknown', ok: result.ok, ...(!result.ok && { error: result.error }), ms: now() - t0 });
           input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result.ok ? result.output : { error: result.error, ...('detail' in result && { detail: result.detail }) }) });
-        });
+        }
+        if (abort.signal.aborted) throw new AIError('timeout');
       }
     } finally {
       clearTimeout(timer);

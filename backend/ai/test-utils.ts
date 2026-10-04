@@ -4,6 +4,7 @@ import { memoryStore, writeAll } from '../../src/data/store';
 import type { ApexData } from '../../src/domain/types';
 import { createApex } from '../../src/services/apex';
 import { bball, completedGym, freshData } from '../../src/test-utils';
+import { ActionStore } from './actions';
 import { DEFAULT_LIMITS, loadAIConfig, type AILimits } from './config';
 import { snapshotSource, type AthleteDataSource } from './data';
 import type { ChatDeps } from './handler';
@@ -24,14 +25,31 @@ export async function athleteData(patch: Partial<ApexData> = {}): Promise<ApexDa
   return app.getState().data;
 }
 
-/** Last week's Legs and Monday's Pull logged, hard basketball today, a check-in, a PR, a bodyweight. */
+/** Last week's Legs and Monday's Pull logged; basketball planned this morning but not logged. */
+export const week = (): Partial<ApexData> => ({
+  profile: { goal: 'performance', sport: 'basketball', units: 'kg', schedule: [{ id: 's1', day: 2, kind: 'basketball', time: 'morning', enabled: true }] },
+  instances: [
+    completedGym('legs', '2026-09-30', { 'smith-squat': [[100, 8, 2], [100, 8, 2], [100, 8, 1]], 'leg-press': [[180, 12, 2], [180, 11, 1]] }),
+    completedGym('pull', '2026-10-05', { 'lat-pulldown': [[60, 10, 2], [60, 9, 1]], 'chest-supported-row': [[50, 12, 2]] }),
+  ],
+});
+
+/** The athlete's phone: the app's own service on its own store, at NOW. */
+export async function device(patch: Partial<ApexData> = week()) {
+  const store = memoryStore();
+  await writeAll(store, { ...freshData(), ...patch });
+  const app = createApex(store, () => NOW);
+  await app.init();
+  return app;
+}
+
+/** What the app sends as context.athlete_data. */
+export const snapshot = (app: { getState(): { data: ApexData } }) => JSON.parse(JSON.stringify(app.getState().data)) as ApexData;
+
+/** week(), plus hard basketball today, a check-in, a PR, a bodyweight. */
 export const trainedAthlete = () =>
   athleteData({
-    profile: { goal: 'performance', sport: 'basketball', units: 'kg', schedule: [{ id: 's1', day: 2, kind: 'basketball', time: 'morning', enabled: true }] },
-    instances: [
-      completedGym('legs', '2026-09-30', { 'smith-squat': [[100, 8, 2], [100, 8, 2], [100, 8, 1]], 'leg-press': [[180, 12, 2], [180, 11, 1]] }),
-      completedGym('pull', '2026-10-05', { 'lat-pulldown': [[60, 10, 2], [60, 9, 1]], 'chest-supported-row': [[50, 12, 2]] }),
-    ],
+    ...week(),
     basketball: [bball({ durationMin: 90, rpe: 8, date: TODAY, jumping: 3, sprinting: 2, lowerFatigue: 2 })],
     recovery: [{ date: TODAY, sleepHours: 6, soreness: 3, energy: 3 }],
     records: [{ id: 'pr1', date: '2026-09-30', instanceId: 'w-2026-09-30-legs', exerciseId: 'smith-squat', exerciseName: 'Smith Machine Squat', kind: 'weight', value: 100, previous: 95, detail: '100 kg × 8' }],
@@ -65,21 +83,28 @@ export function fakeClient(script: Script) {
   return { client, bodies };
 }
 
-export function testService(script: Script, limits: Partial<AILimits> = {}) {
+/** A settable clock for action expiry. */
+export const testClock = () => {
+  const c = { ms: Date.now(), now: () => c.ms, advance: (ms: number) => { c.ms += ms; } };
+  return c;
+};
+
+export function testService(script: Script, limits: Partial<AILimits> = {}, actions = new ActionStore()) {
   const logs: AILogEvent[] = [];
   const { client, bodies } = fakeClient(script);
   const config = loadAIConfig({ OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'test-model', APEX_FAST_MODEL: 'test-fast' }, { ...DEFAULT_LIMITS, ...limits });
-  const ai = new AIService({ client, config, logger: (e) => logs.push(e) });
-  return { ai, bodies, logs, config };
+  const ai = new AIService({ client, config, logger: (e) => logs.push(e), actions });
+  return { ai, bodies, logs, config, actions };
 }
 
-export function testDeps(script: Script, opts: { limits?: Partial<AILimits>; data?: AthleteDataSource } = {}) {
-  const { ai, bodies, logs, config } = testService(script, opts.limits);
+export function testDeps(script: Script, opts: { limits?: Partial<AILimits>; data?: AthleteDataSource; actions?: ActionStore } = {}) {
+  const { ai, bodies, logs, config, actions } = testService(script, opts.limits, opts.actions);
   const deps: ChatDeps = {
-    secret: SECRET, ai, limiter: new RateLimiter(config.limits.requestsPerWindow, config.limits.windowMs),
+    secret: SECRET, ai, actions, limiter: new RateLimiter(config.limits.requestsPerWindow, config.limits.windowMs),
+    actionLimiter: new RateLimiter(100, config.limits.windowMs),
     data: opts.data ?? snapshotSource, logger: (e) => logs.push(e), limits: config.limits, now: () => NOW,
   };
-  return { deps, bodies, logs };
+  return { deps, bodies, logs, actions };
 }
 
 export const token = (userId = 'athlete_1', ttlSec = 3600) => signToken(userId, SECRET, ttlSec, NOW.getTime());

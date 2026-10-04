@@ -66,6 +66,7 @@ export type AILogEvent =
   | { event: 'ai.request'; ok: boolean; status: number; code?: string; model?: string; latencyMs: number; rounds?: number; tools?: number }
   | { event: 'ai.tool'; tool: string; ok: boolean; error?: string; ms: number }
   | { event: 'ai.model_error'; category: string; model: string }
+  | { event: 'ai.action'; op: 'propose' | 'confirm' | 'cancel'; type?: string; ok: boolean; status?: number; code?: string; latencyMs?: number }
   | { event: 'ai.config'; problem: string };
 
 export type AILogger = (e: AILogEvent) => void;

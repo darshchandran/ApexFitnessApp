@@ -19,11 +19,11 @@ describe('the Responses API loop', () => {
   it('a plain answer: one request with APEX instructions, strict tools, no storage at OpenAI', async () => {
     const { ai, bodies } = testService(() => say('Hi! Ask me about your training.'));
     const out = await ai.respond(await chat({ message: 'hello' }));
-    expect(out).toEqual({ conversation_id: 'c1', message: 'Hi! Ask me about your training.', model: 'test-model', prompt_version: PROMPT_VERSION, tools_used: [], action_required: null, rounds: 0 });
+    expect(out).toEqual({ conversation_id: 'c1', message: 'Hi! Ask me about your training.', model: 'test-model', prompt_version: PROMPT_VERSION, tools_used: [], action_required: false, action: null, rounds: 0 });
     const b = bodies[0];
     expect(b).toMatchObject({ model: 'test-model', store: false, tool_choice: 'auto', parallel_tool_calls: true, max_output_tokens: 2000 });
     expect(b.instructions).toContain('source of truth');
-    expect(b.tools).toHaveLength(13);
+    expect(b.tools).toHaveLength(14);
     expect(b.input).toEqual([{ role: 'user', content: 'hello' }]);
     expect(b.safety_identifier).toMatch(/^[0-9a-f]{32}$/);
     expect(JSON.stringify(b)).not.toContain('athlete_1'); // neither the user id nor athlete data goes to the model unasked
@@ -170,11 +170,12 @@ describe('conversation memory and actions', () => {
 
   it('a proposed write comes back as action_required and nothing is logged', async () => {
     const data = await trainedAthlete();
-    const { ai } = testService((_b, n) => (n === 0 ? res(callTool('propose_log_basketball', { duration_min: 90, rpe: 8, session_type: 'scrimmage' })) : say('I can log 90 minutes at RPE 8 — confirm in the app to add it.')));
+    const { ai } = testService((_b, n) => (n === 0 ? res(callTool('propose_log_basketball', { duration_min: 90, rpe: 8, session_type: 'scrimmage', lower_body_fatigue: null, date: null })) : say('I can log 90 minutes at RPE 8 — confirm in the app to add it.')));
     const out = await ai.respond(await chat({ message: 'log 90 min of scrimmage, RPE 8', data }));
-    expect(out.action_required).toEqual({
-      action: 'log_basketball', arguments: { date: TODAY, duration_min: 90, rpe: 8, session_type: 'scrimmage' },
-      summary: 'Log basketball: 90 min at RPE 8 (scrimmage) on 2026-10-07.', requires_confirmation: true,
+    expect(out.action_required).toBe(true);
+    expect(out.action).toMatchObject({
+      type: 'log_basketball', arguments: { date: TODAY, duration_min: 90, rpe: 8, session_type: 'scrimmage', lower_body_fatigue: null },
+      summary: 'Log basketball — 90 min at RPE 8, scrimmage, today.', requires_confirmation: true, status: 'pending',
     });
     expect(data.basketball).toHaveLength(1);
   });

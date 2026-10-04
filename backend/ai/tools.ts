@@ -4,8 +4,9 @@
 // authenticated caller, frozen, for this request only. No tool takes a user id, a query, a path or
 // a URL, so the model can't name anyone else's data or reach storage, SQL, files, the network or a
 // shell. Every number comes from existing APEX services/domain code; nothing here recalculates
-// training logic. Read tools only read; the one 'propose' tool drafts a write for the athlete to
-// confirm in the app and executes nothing.
+// training logic. Read tools only read. Propose tools (one per enabled action in actions.ts) preview
+// the action on a private copy and draft it for the athlete to confirm — they never execute it, and
+// there is no execute tool: execution happens only at POST /ai/actions/:id/confirm.
 import { GYM_EXERCISES, gymExercise, hasGymExercise } from '../../src/domain/catalog';
 import { APEX_CONFIG } from '../../src/domain/config';
 import { completed } from '../../src/domain/history';
@@ -19,15 +20,16 @@ import type { ApexData, ISODate, SessionInstance, SetLog } from '../../src/domai
 import { addDays, weekdayIndex } from '../../src/domain/util';
 import { muscleVolume } from '../../src/domain/volume';
 import { progressOverview, todayOverview } from '../../src/services/apex';
-import { ACTIONS, BASKETBALL_TYPES, check, S, type ActionProposal, type Schema } from './schemas';
+import { ACTIONS, ActionRejected, simulate, type ActionDraft, type ActionType } from './actions';
+import { check, S, type Schema } from './schemas';
 
 export interface ToolContext {
   /** The authenticated athlete's data for this request (frozen), or null when none was sent. */
   readonly data: Readonly<ApexData> | null;
   /** The athlete's local date. */
   readonly today: ISODate;
-  /** Write proposals drafted during this request — the only thing a tool may add to. */
-  readonly proposals: ActionProposal[];
+  /** Actions drafted during this request — the only thing a tool may add to. */
+  readonly proposals: ActionDraft[];
 }
 
 type Args = Record<string, unknown>;
@@ -35,7 +37,7 @@ type Args = Record<string, unknown>;
 export interface ApexTool {
   name: string;
   description: string;
-  /** 'read' looks; 'propose' drafts a write for the athlete to confirm. There is no 'write'. */
+  /** 'read' looks; 'propose' drafts an action for the athlete to confirm. No tool executes anything. */
   access: 'read' | 'propose';
   input: Schema;
   output: Schema;
@@ -163,7 +165,7 @@ const LOAD_NOTE = 'Training load is APEX’s internal programming number (arbitr
 
 // ---------- the tools ----------
 
-export const TOOLS: ApexTool[] = [
+const READ_TOOLS: ApexTool[] = [
   {
     name: 'get_athlete_profile',
     access: 'read',
@@ -478,25 +480,41 @@ export const TOOLS: ApexTool[] = [
       };
     },
   },
-  {
-    name: 'propose_log_basketball',
-    access: 'propose',
-    description: 'Draft logging a basketball session for today. Nothing is logged: the athlete must confirm it in the app. Only use when the athlete asks to log basketball and gave the duration and the effort (RPE 1–10).',
-    input: S.obj({
-      duration_min: S.int(1, 600, 'Minutes played'),
-      rpe: S.int(1, 10, 'Session effort 1–10, as the athlete said it'),
-      session_type: S.orNull(S.oneOf(BASKETBALL_TYPES)),
-    }),
-    output: S.obj({ status: S.oneOf(['awaiting_confirmation']), summary: S.str() }),
-    run(_d, a, ctx) {
-      const args = { date: ctx.today, duration_min: a.duration_min, rpe: a.rpe, session_type: a.session_type ?? null };
-      if (check(ACTIONS.log_basketball, args)) throw new Error('proposal outside the action contract');
-      const summary = `Log basketball: ${args.duration_min} min at RPE ${args.rpe}${args.session_type ? ` (${args.session_type})` : ''} on ${ctx.today}.`;
-      ctx.proposals.push({ action: 'log_basketball', arguments: args, summary, requires_confirmation: true });
-      return { status: 'awaiting_confirmation', summary };
-    },
-  },
 ];
+
+const PROPOSAL_OUTPUT = S.obj({
+  status: S.oneOf(['awaiting_confirmation', 'rejected']),
+  summary: S.orNull(S.str()),
+  would_change: S.list(S.str()),
+  reason: S.orNull(S.str()),
+});
+
+/** One propose tool per enabled action: preview through the real service, then a draft — or a rejection. */
+const PROPOSE_TOOLS: ApexTool[] = (Object.keys(ACTIONS) as ActionType[]).flatMap((type) => {
+  const def = ACTIONS[type];
+  const p = def.proposal;
+  if (!def.enabled || !p) return [];
+  return [{
+    name: p.name,
+    access: 'propose' as const,
+    description: p.description,
+    input: p.input,
+    output: PROPOSAL_OUTPUT,
+    async run(d: ApexData, a: Args, ctx: ToolContext) {
+      const args = p.toArgs(a, ctx.today);
+      try {
+        const sim = await simulate(d, type, args, ctx.today);
+        ctx.proposals.push({ type, arguments: args, summary: sim.summary, preview: sim.preview, basis: sim.basis });
+        return { status: 'awaiting_confirmation', summary: sim.summary, would_change: sim.preview, reason: null };
+      } catch (e) {
+        if (e instanceof ActionRejected) return { status: 'rejected', summary: null, would_change: [], reason: e.message };
+        throw e;
+      }
+    },
+  }];
+});
+
+export const TOOLS: ApexTool[] = [...READ_TOOLS, ...PROPOSE_TOOLS];
 
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
@@ -508,7 +526,7 @@ export type ToolError = 'unknown_tool' | 'invalid_arguments' | 'athlete_data_una
 export type ToolResult = { ok: true; output: unknown } | { ok: false; error: ToolError; detail?: string };
 
 /** Validate → run → validate the output. Failures come back as data for the model, never as exceptions. */
-export function runTool(name: string, rawArgs: string, ctx: ToolContext): ToolResult {
+export async function runTool(name: string, rawArgs: string, ctx: ToolContext): Promise<ToolResult> {
   const tool = BY_NAME.get(name);
   if (!tool) return { ok: false, error: 'unknown_tool' };
   let args: unknown;
@@ -521,7 +539,7 @@ export function runTool(name: string, rawArgs: string, ctx: ToolContext): ToolRe
   if (bad) return { ok: false, error: 'invalid_arguments', detail: bad };
   if (!ctx.data) return { ok: false, error: 'athlete_data_unavailable' };
   try {
-    const output: unknown = JSON.parse(JSON.stringify(tool.run(ctx.data as ApexData, args as Args, ctx)));
+    const output: unknown = JSON.parse(JSON.stringify(await tool.run(ctx.data as ApexData, args as Args, ctx)));
     const drift = check(tool.output, output);
     return drift ? { ok: false, error: 'tool_failed', detail: `output contract: ${drift}` } : { ok: true, output };
   } catch {

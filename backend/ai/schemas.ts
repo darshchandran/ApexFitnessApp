@@ -2,6 +2,7 @@
 // the confirmation contract for writes. Everything that crosses in from the model or the client is
 // checked here before it reaches APEX code.
 import type { ISODate } from '../../src/domain/types';
+import type { ClientAction } from './actions';
 import type { AILimits, ModelMode } from './config';
 
 type SchemaType = 'string' | 'integer' | 'number' | 'boolean' | 'array' | 'object' | 'null';
@@ -118,29 +119,7 @@ export const requestSchema = (limits: AILimits): Schema => ({
   },
 });
 
-/**
- * A write the AI may only *propose*. Nothing executes on the server: the app shows the proposal,
- * the athlete confirms, and the app's own service performs it (and reports the result).
- */
-export interface ActionProposal {
-  action: ActionName;
-  arguments: Record<string, unknown>;
-  summary: string;
-  requires_confirmation: true;
-}
-
 export const BASKETBALL_TYPES = ['skills', 'shooting', 'conditioning', 'scrimmage', 'game', 'mixed'] as const;
-
-/** Every action the AI can propose, with its argument contract. Future: log_gym_set, start/finish_workout, adapt_today_workout. */
-export const ACTIONS = {
-  log_basketball: S.obj({
-    date: S.text(ISO_DATE),
-    duration_min: S.int(1, 600),
-    rpe: S.int(1, 10),
-    session_type: S.orNull(S.oneOf(BASKETBALL_TYPES)),
-  }),
-} as const;
-export type ActionName = keyof typeof ACTIONS;
 
 export interface AIMessageResponse {
   conversation_id: string;
@@ -149,13 +128,31 @@ export interface AIMessageResponse {
   prompt_version: string;
   /** Tool names only — no tool data. */
   tools_used: string[];
-  /** Set when the AI proposed a write; the app must ask the athlete before doing anything. */
-  action_required: ActionProposal | null;
+  /** true when the AI proposed an action: show it, and confirm or cancel it via /ai/actions/:id. */
+  action_required: boolean;
+  action: ClientAction | null;
 }
 
+/** POST /ai/actions/:id/confirm — never carries new arguments; `arguments` is only an echo of what was shown. */
+export const confirmSchema = (): Schema => ({
+  type: 'object',
+  additionalProperties: false,
+  required: ['context'],
+  properties: {
+    arguments: { type: 'object' },
+    context: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['today', 'athlete_data'],
+      properties: { today: S.text(ISO_DATE), athlete_data: { type: 'object' } },
+    },
+  },
+});
+
 export type AIErrorCode =
-  | 'unauthorized' | 'rate_limited' | 'invalid_request' | 'payload_too_large' | 'method_not_allowed'
-  | 'ai_unavailable' | 'timeout' | 'model_error' | 'tool_limit' | 'internal';
+  | 'unauthorized' | 'rate_limited' | 'invalid_request' | 'payload_too_large' | 'method_not_allowed' | 'not_found'
+  | 'ai_unavailable' | 'timeout' | 'model_error' | 'tool_limit' | 'internal'
+  | 'action_expired' | 'action_cancelled' | 'action_not_pending' | 'arguments_changed' | 'action_not_allowed' | 'action_failed';
 
 const UNAFFECTED = 'Your workouts and training data are not affected.';
 export const ERRORS: Record<AIErrorCode, { status: number; message: string }> = {
@@ -164,11 +161,18 @@ export const ERRORS: Record<AIErrorCode, { status: number; message: string }> = 
   invalid_request: { status: 400, message: 'That request could not be read.' },
   payload_too_large: { status: 413, message: 'That request is too large.' },
   method_not_allowed: { status: 405, message: 'Use POST.' },
+  not_found: { status: 404, message: 'Not found.' },
   ai_unavailable: { status: 503, message: `APEX AI is unavailable right now. ${UNAFFECTED}` },
   timeout: { status: 504, message: `APEX AI took too long to answer. ${UNAFFECTED}` },
   model_error: { status: 502, message: `APEX AI could not answer that. ${UNAFFECTED}` },
   tool_limit: { status: 502, message: `That question needed too many steps. Try asking something narrower. ${UNAFFECTED}` },
   internal: { status: 500, message: `Something went wrong with APEX AI. ${UNAFFECTED}` },
+  action_expired: { status: 410, message: 'That request expired. Ask again.' },
+  action_cancelled: { status: 409, message: 'That request was cancelled.' },
+  action_not_pending: { status: 409, message: 'That request is no longer waiting for confirmation.' },
+  arguments_changed: { status: 409, message: 'That request changed after it was proposed, so it was cancelled. Ask again.' },
+  action_not_allowed: { status: 403, message: 'That action isn’t available.' },
+  action_failed: { status: 422, message: 'Nothing was changed.' },
 };
 
 export interface AIErrorBody {

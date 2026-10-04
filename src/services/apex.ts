@@ -19,7 +19,7 @@ import type {
 } from '../domain/types';
 import { addDays, toISODate, uid } from '../domain/util';
 import {
-  clearData, loadData, writeAll, writeDocs, writeInstances, type Collection, type Doc, type KeyValueStore,
+  clearData, loadData, validInstance, writeAll, writeDocs, writeInstances, type Collection, type Doc, type KeyValueStore,
 } from '../data/store';
 
 export interface ApexState {
@@ -32,6 +32,12 @@ export interface ApexState {
 }
 
 export type SessionKind = SessionInstance['kind'];
+
+/** What an action the athlete confirmed on the AI backend changed — stored on the device by applyActionChanges. */
+export interface ActionChanges {
+  basketball: BasketballSession[];
+  instances: SessionInstance[];
+}
 
 /** A second identical tap inside this window is treated as the same action. */
 export const DOUBLE_TAP_MS = 1500;
@@ -566,6 +572,28 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
       commit({ basketball: [...data().basketball, session] });
       refreshToday();
       return session;
+    },
+
+    /**
+     * Store what a confirmed AI action changed. Upserts by id, so applying the same result again (a
+     * retry) changes nothing. Only new basketball sessions and today's unstarted sessions are accepted:
+     * history, templates and the profile can't change from here. Returns how many records changed.
+     */
+    applyActionChanges(ch: ActionChanges) {
+      const d = data();
+      const basketball = (ch.basketball ?? []).filter((b) =>
+        typeof b?.id === 'string' && typeof b.date === 'string' && validNumber(b.durationMin, 1, 600) && validNumber(b.rpe, 1, 10) && !d.basketball.some((x) => x.id === b.id));
+      const replace = new Map((ch.instances ?? [])
+        .filter((i) => validInstance(i) && i.date === today() && (i.status === 'planned' || i.status === 'skipped') && d.instances.find((x) => x.id === i.id)?.status === 'planned')
+        .filter((i) => JSON.stringify(i) !== JSON.stringify(findInstance(i.id)))
+        .map((i) => [i.id, i]));
+      if (!basketball.length && !replace.size) return 0;
+      commit({
+        ...(basketball.length && { basketball: [...d.basketball, ...basketball] }),
+        ...(replace.size && { instances: d.instances.map((i) => replace.get(i.id) ?? i) }),
+      });
+      refreshToday();
+      return basketball.length + replace.size;
     },
 
     deleteBasketball(id: string) {

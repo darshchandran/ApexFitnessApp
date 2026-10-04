@@ -117,7 +117,7 @@ describe('the endpoint', () => {
     expect(r.headers.get('cache-control')).toBe('no-store');
     expect(await r.json()).toEqual({
       conversation_id: expect.stringMatching(/^[\w-]{8,}$/), message: 'Fine.', model: 'test-model',
-      prompt_version: expect.stringMatching(/^apex-ai-/), tools_used: [], action_required: null,
+      prompt_version: expect.stringMatching(/^apex-ai-/), tools_used: [], action_required: false, action: null,
     });
   });
 
@@ -215,7 +215,12 @@ describe('architecture boundary', () => {
   it('the AI backend has no storage, network, file, process or app-UI access of its own', () => {
     for (const f of files(join(ROOT, 'backend', 'ai')).filter((p) => !p.includes('__tests__') && !p.endsWith('test-utils.ts'))) {
       const s = readFileSync(f, 'utf8');
-      expect(s).not.toMatch(/async-storage|react-native|from ['"]react['"]|node:fs|node:child_process|\bfetch\(|\beval\(|new Function|writeDocs|writeInstances|clearData|\bcreateApex\b/);
+      expect(s).not.toMatch(/async-storage|react-native|from ['"]react['"]|node:fs|node:child_process|\bfetch\(|\beval\(|new Function|writeDocs|writeInstances|clearData/);
+      // the app's service runs only in the action executor, and only on a private in-memory copy
+      if (!f.endsWith('actions.ts')) expect(s).not.toMatch(/\bcreateApex\b/);
     }
+    const actions = readFileSync(join(ROOT, 'backend', 'ai', 'actions.ts'), 'utf8');
+    expect(actions.match(/createApex\(/g)).toHaveLength(1);
+    expect(actions).toMatch(/const store = memoryStore\(\);\s+await writeAll\(store, data as ApexData\);\s+const app = createApex\(store, /);
   });
 });
