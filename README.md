@@ -65,7 +65,7 @@ A separate server — the app never contains the OpenAI key and doesn't call it 
 
 ```bash
 cp .env.example .env    # OPENAI_API_KEY, APEX_AI_MODEL (+ optional APEX_FAST_MODEL / APEX_DEEP_MODEL), APEX_AUTH_SECRET
-npm run ai:server       # POST http://127.0.0.1:8787/ai/chat
+npm run ai:server       # POST http://127.0.0.1:8787/ai/chat, /ai/actions/:id/confirm|cancel
 ```
 
 ```
@@ -77,6 +77,8 @@ backend/ai/data.ts     the device's own data, sent with the request, checked lik
 backend/ai/schemas.ts  strict tool schemas, request/response contract, action-confirmation contract, error codes
 backend/ai/prompts.ts  versioned instructions
 ```
+
+Actions (`backend/ai/actions.ts`): the model can only *propose* (`log_basketball`, `adapt_today_workout`; other contracts defined but disabled). `POST /ai/actions/:id/confirm` runs the stored proposal once through the app's own service on a copy of the device's data and returns `ActionChanges`, which the app stores with `apex.applyActionChanges()` (idempotent by record id); `POST /ai/actions/:id/cancel` cancels. Proposals are bound to the athlete and expire after 5 minutes. **Known limitation:** pending and executed actions live in server memory — a restart drops them (a stale confirm gets 404 and can't execute); use a shared store before running more than one server.
 
 Tools call the existing services/domain (`todayOverview`, `progressOverview`, logbook, volume…) — no training logic is duplicated, and APEX's engine stays authoritative. Request: `{ conversation_id?, message, mode?, context?: { today, athlete_data } }`; response: `{ conversation_id, message, model, prompt_version, tools_used, action_required }`.
 
