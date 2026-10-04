@@ -41,3 +41,7 @@ example
 # generated native folders
 /ios
 /android
+
+# local env + build output (never commit secrets)
+.env
+build/
