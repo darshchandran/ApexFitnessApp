@@ -13,4 +13,5 @@ try {
 const deps = createChatDeps(process.env, (apiKey) => new OpenAI({ apiKey, maxRetries: 1 }) as unknown as ResponsesClient);
 const port = Number(process.env.PORT) || 8787;
 const host = process.env.HOST || '127.0.0.1';
-createAIServer(deps).listen(port, host, () => console.info(JSON.stringify({ event: 'ai.server', host, port, ai: !!deps.ai, auth: !!deps.secret })));
+const corsOrigins = (process.env.APEX_AI_CORS_ORIGINS ?? '').split(',').map((o) => o.trim()).filter(Boolean);
+createAIServer(deps, { corsOrigins }).listen(port, host, () => console.info(JSON.stringify({ event: 'ai.server', host, port, ai: !!deps.ai, auth: !!deps.secret })));

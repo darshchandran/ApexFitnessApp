@@ -117,6 +117,7 @@ export default function RootLayout() {
             <Stack.Screen name="session/[id]" options={{ animation: 'slide_from_right' }} />
             <Stack.Screen name="exercise/[id]" options={{ animation: 'slide_from_right' }} />
             <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
+            <Stack.Screen name="ai" options={{ animation: 'slide_from_right' }} />
           </Stack>
           <StorageNotice />
         </View>

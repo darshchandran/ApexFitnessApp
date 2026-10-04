@@ -8,6 +8,7 @@ export const go = {
   session: (id: string) => router.push({ pathname: '/session/[id]', params: { id } }),
   practice: () => router.push('/practice'),
   settings: () => router.push('/settings'),
+  ai: () => router.push('/ai'),
   train: () => router.navigate('/train'),
 };
 

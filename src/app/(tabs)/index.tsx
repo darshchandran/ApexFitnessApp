@@ -94,7 +94,10 @@ export default function Home() {
     <Screen>
       <View style={styles.top}>
         <ApexMark size={20} />
-        <IconButton icon="user" label="Profile" onPress={go.settings} filled size={40} />
+        <View style={{ flexDirection: 'row', gap: S.sm }}>
+          <IconButton icon="chat" label="APEX AI" onPress={go.ai} filled size={40} />
+          <IconButton icon="user" label="Profile" onPress={go.settings} filled size={40} />
+        </View>
       </View>
 
       <Txt v="overline" style={{ marginTop: S.xl }}>Today</Txt>

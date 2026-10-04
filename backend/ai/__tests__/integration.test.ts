@@ -28,7 +28,7 @@ async function nodeFetch(input: string | URL | Request, init: RequestInit = {}):
     const req = request(url, { method: init.method ?? 'GET', headers }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (c: Buffer) => chunks.push(c));
-      res.on('end', () => resolve(new Response(Buffer.concat(chunks), {
+      res.on('end', () => resolve(new Response(res.statusCode === 204 ? null : Buffer.concat(chunks), {
         status: res.statusCode, headers: Object.entries(res.headers).flatMap(([k, v]) => (v === undefined ? [] : [[k, String(v)] as [string, string]])),
       })));
     });
@@ -313,6 +313,35 @@ describe('restart (pending actions live in memory)', () => {
       expect(snapshot(app).basketball).toHaveLength(1);
     } finally {
       await close(second.server);
+    }
+  });
+});
+
+describe('web build access (CORS)', () => {
+  it('only allow-listed browser origins get CORS headers; native requests need none', async () => {
+    const deps = createChatDeps(env(), makeClient, () => undefined);
+    deps.now = () => NOW;
+    const server = createAIServer(deps, { corsOrigins: ['http://localhost:8081'] });
+    const url = await listen(server);
+    try {
+      const preflight = (origin: string) => nodeFetch(`${url}/ai/chat`, { method: 'OPTIONS', headers: { origin, 'access-control-request-method': 'POST' } });
+      const ok = await preflight('http://localhost:8081');
+      expect([ok.status, ok.headers.get('access-control-allow-origin'), ok.headers.get('access-control-allow-headers')]).toEqual([204, 'http://localhost:8081', 'authorization, content-type']);
+      const evil = await preflight('https://evil.example');
+      expect([evil.status, evil.headers.get('access-control-allow-origin')]).toEqual([403, null]);
+      const res = await nodeFetch(`${url}/ai/chat`, { method: 'POST', headers: { origin: 'http://localhost:8081', 'content-type': 'application/json' }, body: '{}' });
+      expect([res.status, res.headers.get('access-control-allow-origin')]).toEqual([401, 'http://localhost:8081']); // still authenticated
+      const native = await post(url, '/ai/chat', { message: 'hi' });
+      expect([native.status, native.json.message]).toEqual([200, 'Hello.']);
+    } finally {
+      await close(server);
+    }
+    const closed = createAIServer(deps); // default: no browser origin allowed
+    const u2 = await listen(closed);
+    try {
+      expect((await nodeFetch(`${u2}/ai/chat`, { method: 'OPTIONS', headers: { origin: 'http://localhost:8081' } })).status).toBe(403);
+    } finally {
+      await close(closed);
     }
   });
 });

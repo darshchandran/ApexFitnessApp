@@ -35,6 +35,7 @@ const PATHS = {
   more: 'M5 12h.01M12 12h.01M19 12h.01',
   list: 'M9 7h11M9 12h11M9 17h11M4.5 7h.01M4.5 12h.01M4.5 17h.01',
   settings: 'M4 7h10M18 7h2M4 17h2M10 17h10M14 5v4M6 15v4',
+  chat: 'M4.5 5.5h15v10H11l-4.5 4v-4h-2zM8.5 10.5h.01M12 10.5h.01M15.5 10.5h.01',
 } as const;
 
 export type IconName = keyof typeof PATHS;

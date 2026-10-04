@@ -207,8 +207,14 @@ describe('architecture boundary', () => {
     for (const f of files(join(ROOT, 'src'))) {
       const s = readFileSync(f, 'utf8');
       expect(s).not.toMatch(/from ['"][./]*backend\/|from ['"]openai|require\(['"]openai/);
-      expect(s).not.toMatch(/OPENAI_API_KEY|EXPO_PUBLIC_[A-Z_]*(OPENAI|AI_KEY|API_KEY|SECRET)/);
+      expect(s).not.toMatch(/OPENAI_API_KEY|APEX_AUTH_SECRET|EXPO_PUBLIC_[A-Z_]*(OPENAI|AI_KEY|API_KEY|SECRET|TOKEN)/);
     }
+    // the app's AI client and screen never log (tokens, athlete data, messages)
+    for (const f of ['src/services/ai.ts', 'src/services/useAI.ts', 'src/ui/ai.tsx', 'src/app/ai.tsx']) {
+      expect(readFileSync(join(ROOT, f), 'utf8')).not.toMatch(/console\./);
+    }
+    // the only build-time AI setting is the server address
+    expect(readFileSync(join(ROOT, 'src/services/useAI.ts'), 'utf8').match(/EXPO_PUBLIC_\w+/g)).toEqual(['EXPO_PUBLIC_APEX_AI_URL']);
     expect(readFileSync(join(ROOT, 'app.json'), 'utf8')).not.toMatch(/openai|api[_-]?key|secret/i);
   });
 

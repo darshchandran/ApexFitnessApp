@@ -78,6 +78,8 @@ backend/ai/schemas.ts  strict tool schemas, request/response contract, action-co
 backend/ai/prompts.ts  versioned instructions
 ```
 
+In the app: **APEX AI** (chat icon in the Home header → `src/app/ai.tsx`, UI in `src/ui/ai.tsx`, client in `src/services/ai.ts`). It talks only to the APEX AI server; the first time, enter the server address (or build with `EXPO_PUBLIC_APEX_AI_URL`) and an access token — until APEX has accounts, mint one on the server with `npm run ai:token -- <athlete-id> [days]`. The conversation is kept on the device under its own bounded key; confirmed actions are stored with `apex.applyActionChanges()`. The web build needs its origin in `APEX_AI_CORS_ORIGINS`.
+
 Actions (`backend/ai/actions.ts`): the model can only *propose* (`log_basketball`, `adapt_today_workout`; other contracts defined but disabled). `POST /ai/actions/:id/confirm` runs the stored proposal once through the app's own service on a copy of the device's data and returns `ActionChanges`, which the app stores with `apex.applyActionChanges()` (idempotent by record id); `POST /ai/actions/:id/cancel` cancels. Proposals are bound to the athlete and expire after 5 minutes. **Known limitation:** pending and executed actions live in server memory — a restart drops them (a stale confirm gets 404 and can't execute); use a shared store before running more than one server.
 
 Tools call the existing services/domain (`todayOverview`, `progressOverview`, logbook, volume…) — no training logic is duplicated, and APEX's engine stays authoritative. Request: `{ conversation_id?, message, mode?, context?: { today, athlete_data } }`; response: `{ conversation_id, message, model, prompt_version, tools_used, action_required }`.
