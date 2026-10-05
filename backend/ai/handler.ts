@@ -9,7 +9,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { ApexData, ISODate } from '../../src/domain/types';
 import { daysBetween } from '../../src/domain/util';
-import { pendingMigrations, type Db } from '../db/db';
+import { pendingMigrations, type Db, type Migration } from '../db/db';
 import { ACTIONS, ActionRejected, resultMessage, simulate, type ActionResult } from './actions';
 import { refreshSession, registerDevice, revokeSession } from './auth';
 import { DEFAULT_LIMITS, type AILimits, type Environment, type ServerConfig } from './config';
@@ -33,6 +33,8 @@ export interface ChatDeps {
   logger: AILogger;
   limits: AILimits;
   now?: () => Date;
+  /** The migrations this build expects (default: the files in supabase/migrations). */
+  migrations?: Migration[];
 }
 
 export function createDeps(config: ServerConfig, db: Db, makeClient: (apiKey: string) => ResponsesClient, logger: AILogger = consoleLogger): ChatDeps {
@@ -52,7 +54,7 @@ export function createDeps(config: ServerConfig, db: Db, makeClient: (apiKey: st
 export async function readiness(deps: ChatDeps): Promise<{ status: number; body: { status: 'ready' | 'not_ready'; checks: Record<string, string> } }> {
   const checks: Record<string, string> = { database: 'unreachable', schema: 'unknown', auth: deps.secret ? 'configured' : 'missing', model: deps.ai ? 'configured' : 'missing' };
   try {
-    checks.schema = (await pendingMigrations(deps.db)).length ? 'migrations_pending' : 'current';
+    checks.schema = (await pendingMigrations(deps.db, deps.migrations)).length ? 'migrations_pending' : 'current';
     checks.database = 'ok';
   } catch {
     // unreachable: reported by name only

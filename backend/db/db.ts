@@ -65,14 +65,22 @@ export function pgDb(connectionString: string, opts: { max?: number; tls?: DbTls
 /** Migrations live in supabase/migrations (the Supabase CLI applies the same files with `supabase db push`). */
 export const MIGRATIONS_DIR = process.env.APEX_MIGRATIONS_DIR ?? join(__dirname, '..', '..', 'supabase', 'migrations');
 
-const migrationFiles = (dir: string) => readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+export interface Migration {
+  name: string;
+  sql: string;
+}
+
+/** The migration files in name order. (The edge build embeds this list instead of reading files.) */
+export const readMigrations = (dir = MIGRATIONS_DIR): Migration[] =>
+  readdirSync(dir).filter((f) => f.endsWith('.sql')).sort().map((name) => ({ name, sql: readFileSync(join(dir, name), 'utf8') }));
 
 /** Migrations not yet applied (throws if the database is unreachable). Used by the readiness check. */
-export async function pendingMigrations(db: Queryable, dir = MIGRATIONS_DIR): Promise<string[]> {
+export async function pendingMigrations(db: Queryable, migrations = readMigrations()): Promise<string[]> {
+  const names = migrations.map((m) => m.name);
   const t = await db.query<{ ok: string | null }>("select to_regclass('public.apex_migrations')::text as ok");
-  if (!t.rows[0]?.ok) return migrationFiles(dir);
+  if (!t.rows[0]?.ok) return names;
   const done = new Set((await db.query<{ name: string }>('select name from public.apex_migrations')).rows.map((r) => r.name));
-  return migrationFiles(dir).filter((f) => !done.has(f));
+  return names.filter((n) => !done.has(n));
 }
 
 /**
@@ -80,16 +88,15 @@ export async function pendingMigrations(db: Queryable, dir = MIGRATIONS_DIR): Pr
  * apex_migrations. Safe to run on every start and from several instances at once (advisory lock),
  * and safe on a database the Supabase CLI already migrated (every statement is idempotent).
  */
-export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
+export async function migrate(db: Db, migrations = readMigrations()): Promise<string[]> {
   await db.query('create table if not exists public.apex_migrations (name text primary key, applied_at timestamptz not null default now())');
-  const files = migrationFiles(dir);
   const applied: string[] = [];
-  for (const name of files) {
+  for (const { name, sql } of migrations) {
     const ran = await db.tx(async (q) => {
       await q.query('select pg_advisory_xact_lock(4247001)');
       const done = await q.query('select 1 from public.apex_migrations where name = $1', [name]);
       if (done.rowCount) return false;
-      await q.query(readFileSync(join(dir, name), 'utf8'));
+      await q.query(sql);
       await q.query('insert into public.apex_migrations (name) values ($1) on conflict do nothing', [name]);
       return true;
     });

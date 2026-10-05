@@ -3,10 +3,10 @@
 // credentials, a database, explicit CORS and an explicit registration policy.
 import OpenAI from 'openai';
 import { loadCa, migrate, pgDb, type Db } from './db/db';
-import { ConfigError, loadServerConfig } from './ai/config';
+import { loadServerConfig } from './ai/config';
 import { createDeps } from './ai/handler';
 import type { ResponsesClient } from './ai/service';
-import { createAIServer } from './http';
+import { createAIServer, startupFailure } from './http';
 
 async function main() {
   try {
@@ -35,11 +35,7 @@ async function main() {
     console.info(JSON.stringify({ event: 'ai.server', env: config.env, host, port, ai: !!deps.ai, migrations: applied.length, registration: config.registration, cors: config.corsOrigins.length })));
 }
 
-/** An error message with connection strings and anything that looks like a key masked. */
-const scrub = (m: unknown) => String(m ?? '').replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, '<url>').replace(/\b(sk|rt|v1|dev1)[-_.][\w.-]{8,}/g, '<secret>').slice(0, 300);
-
 main().catch((e) => {
-  // configuration problems name variables, never values; other failures are reported scrubbed
-  console.error(JSON.stringify(e instanceof ConfigError ? { event: 'ai.config', problems: e.problems } : { event: 'ai.startup_failed', category: e?.name ?? 'error', code: e?.code, message: scrub(e?.message) }));
+  console.error(JSON.stringify(startupFailure(e)));
   process.exit(1);
 });

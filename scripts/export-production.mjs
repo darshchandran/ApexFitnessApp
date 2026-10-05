@@ -9,7 +9,7 @@ const fail = (m) => {
   console.error(m);
   process.exit(1);
 };
-if (!url || !/^https:\/\/[^\s/]+$/.test(url)) fail('Set EXPO_PUBLIC_APEX_AI_URL to the production AI backend, e.g. https://ai.example.com (https, no path).');
+if (!url || !/^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(url)) fail('Set EXPO_PUBLIC_APEX_AI_URL to the production AI backend, e.g. https://<project>.supabase.co/functions/v1/apex-ai (https, no query).');
 if (/^https:\/\/(localhost|127\.|10\.|192\.168\.|\[::1\])/i.test(url)) fail('EXPO_PUBLIC_APEX_AI_URL points at a local address — not a production backend.');
 for (const secret of ['OPENAI_API_KEY', 'APEX_AUTH_SECRET', 'DATABASE_URL']) {
   if (process.env[`EXPO_PUBLIC_${secret}`]) fail(`EXPO_PUBLIC_${secret} is set — it would be bundled into the app. Remove it.`);

@@ -1,8 +1,13 @@
-// node:http → the AI routes (Request/Response). Used by server.ts and the integration tests.
+// The AI routes as one Request → Response function (`serve`), plus its node:http adapter
+// (`createAIServer`, used by server.ts and the integration tests). edge.ts serves the same
+// function on Supabase Edge Functions.
 import { createServer, type IncomingMessage } from 'node:http';
+import { ConfigError } from './ai/config';
 import { readiness, route, type ChatDeps } from './ai/handler';
 
-const notFound = JSON.stringify({ error: { code: 'not_found', message: 'Not found.' } });
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+const notFound = { error: { code: 'not_found', message: 'Not found.' } };
 const tooLarge = JSON.stringify({ error: { code: 'payload_too_large', message: 'That request is too large.' } });
 
 /**
@@ -17,45 +22,56 @@ export function clientAddress(req: IncomingMessage, trustProxy: boolean) {
 }
 
 /**
- * `corsOrigins`: exact browser origins allowed to call the API (the web build). Native apps send no
- * Origin and need none. Empty = no browser origin is allowed.
+ * Health checks, CORS and the AI routes. `corsOrigins`: exact browser origins allowed to call the
+ * API (the web build); native apps send no Origin and need none. `clientIp`: the address the
+ * runtime observed — never a header the client controls.
  */
-export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[], trustProxy = false } = {}) => {
-  const cors = (req: IncomingMessage): Record<string, string> => {
-    const origin = req.headers.origin;
-    return origin && corsOrigins.includes(origin) ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
-  };
-  return createServer(async (req, res) => {
-    // liveness (the process answers) and readiness (it can serve): for the host's health checks
-    if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/readyz')) {
-      const r = req.url === '/healthz' ? { status: 200, body: { status: 'ok' } } : await readiness(deps);
-      return res.writeHead(r.status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(r.body));
-    }
-    if (!req.url?.startsWith('/ai/')) return res.writeHead(404, { 'content-type': 'application/json' }).end(notFound);
-    if (req.method === 'OPTIONS') {
-      const allowed = cors(req);
-      return res.writeHead(allowed['access-control-allow-origin'] ? 204 : 403, {
-        ...allowed,
-        ...(allowed['access-control-allow-origin'] && { 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'authorization, content-type', 'access-control-max-age': '600' }),
-      }).end();
-    }
+export async function serve(req: Request, deps: ChatDeps, { corsOrigins = [] as string[], clientIp = 'unknown' } = {}): Promise<Response> {
+  const path = new URL(req.url).pathname;
+  const origin = req.headers.get('origin');
+  const cors: Record<string, string> = origin && corsOrigins.includes(origin) ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
+  // liveness (the process answers) and readiness (it can serve): for the host's health checks
+  if (req.method === 'GET' && (path === '/healthz' || path === '/readyz')) {
+    const r = path === '/healthz' ? { status: 200, body: { status: 'ok' } } : await readiness(deps);
+    return json(r.status, r.body, { 'cache-control': 'no-store' });
+  }
+  if (!path.startsWith('/ai/')) return json(404, notFound);
+  if (req.method === 'OPTIONS') {
+    return new Response(null, {
+      status: cors['access-control-allow-origin'] ? 204 : 403,
+      headers: cors['access-control-allow-origin'] ? { ...cors, 'access-control-allow-methods': 'POST', 'access-control-allow-headers': 'authorization, content-type', 'access-control-max-age': '600' } : {},
+    });
+  }
+  const out = await route(req, deps, { clientIp });
+  return new Response(out.body, { status: out.status, headers: { ...Object.fromEntries(out.headers), ...cors } });
+}
+
+export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[], trustProxy = false } = {}) =>
+  createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of req) {
       size += chunk.length;
       if (size > deps.limits.maxBodyBytes) {
-        res.writeHead(413, { 'content-type': 'application/json', ...cors(req) }).end(tooLarge);
+        const origin = req.headers.origin;
+        res.writeHead(413, { 'content-type': 'application/json', ...(origin && corsOrigins.includes(origin) && { 'access-control-allow-origin': origin, vary: 'origin' }) }).end(tooLarge);
         return req.destroy();
       }
       chunks.push(chunk);
     }
     const headers = new Headers();
     for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers.set(k, v);
-    const out = await route(
+    const out = await serve(
       new Request(`http://localhost${req.url}`, { method: req.method, headers, body: req.method === 'POST' ? Buffer.concat(chunks) : undefined }),
       deps,
-      { clientIp: clientAddress(req, trustProxy) },
+      { corsOrigins, clientIp: clientAddress(req, trustProxy) },
     );
-    res.writeHead(out.status, { ...Object.fromEntries(out.headers), ...cors(req) }).end(await out.text());
+    res.writeHead(out.status, Object.fromEntries(out.headers)).end(await out.text());
   });
-};
+
+/** An error message with connection strings and anything that looks like a key masked. */
+const scrub = (m: unknown) => String(m ?? '').replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, '<url>').replace(/\b(sk|rt|v1|dev1)[-_.][\w.-]{8,}/g, '<secret>').slice(0, 300);
+
+/** The startup-failure log line: configuration problems name variables, never values; anything else is scrubbed. */
+export const startupFailure = (e: any) =>
+  e instanceof ConfigError ? { event: 'ai.config', problems: e.problems } : { event: 'ai.startup_failed', category: e?.name ?? 'error', code: e?.code, message: scrub(e?.message) };

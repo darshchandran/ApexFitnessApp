@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { join } from 'node:path';
 import { loadCa, migrate, MIGRATIONS_DIR, pendingMigrations } from '../../db/db';
+import { edgeClientIp, edgeEnv, edgePath } from '../../edge';
 import { clientAddress } from '../../http';
 import { ACCESS_TTL_SEC } from '../auth';
 import { ConfigError, loadServerConfig } from '../config';
@@ -145,6 +146,24 @@ describe('database TLS and readiness', () => {
     expect((await readiness(deps)).status).toBe(200); // development may run without a model
     const db = await testDb();
     expect(await pendingMigrations(db)).toEqual([]);
+  });
+});
+
+describe('Supabase Edge Function adapter', () => {
+  it('always runs as production with verified TLS; secrets come from the function, the database from Supabase', () => {
+    const env = edgeEnv({ SUPABASE_DB_URL: 'postgres://u:p@db.example.supabase.co:6543/postgres?sslmode=require&x=1', OPENAI_API_KEY: 'sk-x', APEX_ENV: 'development', DATABASE_SSL: 'disable' });
+    expect(env).toMatchObject({ APEX_ENV: 'production', DATABASE_SSL: 'require', APEX_AI_REGISTRATION: 'open', APEX_AI_CORS_ORIGINS: 'none', OPENAI_API_KEY: 'sk-x' });
+    expect(env.DATABASE_URL).toBe('postgres://u:p@db.example.supabase.co:6543/postgres?x=1'); // sslmode can't override the TLS settings
+    expect(edgeEnv({ SUPABASE_DB_URL: 'postgres://h/db?sslmode=require' }).DATABASE_URL).toBe('postgres://h/db');
+    expect(edgeEnv({ SUPABASE_DB_URL: 'postgres://h/db?a=1&sslmode=require' }).DATABASE_URL).toBe('postgres://h/db?a=1');
+    expect(edgeEnv({ APEX_AI_MODEL: 'm-1' }).APEX_AI_MODEL).toBe('m-1');
+  });
+
+  it('routes /apex-ai/<route> to the API and takes the address the proxy observed', () => {
+    expect([edgePath('/apex-ai/ai/chat'), edgePath('/functions/v1/apex-ai/readyz'), edgePath('/apex-ai'), edgePath('/apex-ai-x/ai')]).toEqual(['/ai/chat', '/readyz', '/', '/apex-ai-x/ai']);
+    expect(edgeClientIp(new Headers({ 'cf-connecting-ip': '198.51.100.4', 'x-forwarded-for': '203.0.113.7, 198.51.100.4' }))).toBe('198.51.100.4');
+    expect(edgeClientIp(new Headers({ 'x-forwarded-for': '203.0.113.7, 198.51.100.4' }))).toBe('198.51.100.4');
+    expect(edgeClientIp(new Headers())).toBe('unknown');
   });
 });
 

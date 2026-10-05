@@ -186,7 +186,7 @@ export function aiServerUrl(value: string | undefined, dev: boolean): string | u
   const url = value?.trim().replace(/\/+$/, '');
   if (!url) return undefined;
   if (dev) return url;
-  return /^https:\/\/[^\s/]+$/.test(url) && !/^https:\/\/(localhost|127\.|10\.|192\.168\.|\[::1\])/i.test(url) ? url : undefined;
+  return /^https:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(url) && !/^https:\/\/(localhost|127\.|10\.|192\.168\.|\[::1\])/i.test(url) ? url : undefined;
 }
 
 export function createAssistant(deps: {

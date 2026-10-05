@@ -256,7 +256,8 @@ describe('sign-in', () => {
 describe('the production AI address', () => {
   it('production builds use only an https server that is not on this machine; development uses what it is given', () => {
     expect(aiServerUrl('https://ai.apex.example/', false)).toBe('https://ai.apex.example');
-    for (const bad of ['http://ai.apex.example', 'https://localhost:8787', 'https://127.0.0.1', 'https://192.168.1.20', 'https://ai.apex.example/path', 'ftp://x', '', undefined]) {
+    expect(aiServerUrl('https://abc.supabase.co/functions/v1/apex-ai/', false)).toBe('https://abc.supabase.co/functions/v1/apex-ai');
+    for (const bad of ['http://ai.apex.example', 'https://localhost:8787', 'https://127.0.0.1', 'https://192.168.1.20', 'https://ai.apex.example/x?y=1', 'https://ai.apex.example/#x', 'ftp://x', '', undefined]) {
       expect(aiServerUrl(bad, false)).toBeUndefined();
     }
     expect(aiServerUrl('http://localhost:8787', true)).toBe('http://localhost:8787');
