@@ -73,7 +73,7 @@ npm run ai:smoke -- --url https://<backend>   # live checks against a deployed b
 EXPO_PUBLIC_APEX_AI_URL=https://<backend> npm run export:production   # production clients + bundle scan
 ```
 
-**Deploying:** see [DEPLOY.md](DEPLOY.md) — environment contract, Supabase, container, health checks, mobile configuration, registration policy and live validation.
+**Deploying:** production runs as the Supabase Edge Function `apex-ai` (`npm run ai:build:edge`); see [DEPLOY.md](DEPLOY.md) — Supabase, the environment contract, the container alternative, health checks, mobile configuration, registration policy and live validation.
 
 ```
 backend/server.ts       config (production guards) → Postgres → migrations → HTTP

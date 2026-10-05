@@ -13,6 +13,56 @@ Supabase / Postgres                              OpenAI Responses API
 The athlete's training data stays on the device; the backend stores only install identities,
 hashed refresh tokens, action proposals/results and rate-limit counters (`supabase/migrations`).
 
+## 0. Production: Supabase (database + Edge Function)
+
+Production is the Supabase project **`apex-ai`** (ref `gbknsjfbtdfvazhhrtsn`, region `ap-south-1`,
+org "Apex Fitness App"). The backend runs there as the Edge Function **`apex-ai`**:
+
+```
+https://gbknsjfbtdfvazhhrtsn.supabase.co/functions/v1/apex-ai      ← EXPO_PUBLIC_APEX_AI_URL
+  /healthz  /readyz  /ai/auth/*  /ai/chat  /ai/actions/:id/confirm|cancel
+```
+
+`backend/edge.ts` serves the exact same routes, auth, rate limits, persistent actions and readiness
+as the Node server (`http.ts` `serve()` is shared); only the runtime differs (Deno).
+
+| Setting | Where it comes from |
+| --- | --- |
+| `APEX_ENV=production`, `DATABASE_SSL=require` | fixed in `edge.ts` (cannot be overridden) |
+| `DATABASE_URL` | Supabase's built-in `SUPABASE_DB_URL` (TLS required, certificate verified; any `sslmode` stripped) |
+| `APEX_AUTH_SECRET` | Supabase **Vault** secret `apex_auth_secret`, generated inside the database (below) — nobody ever sees it |
+| `OPENAI_API_KEY` | **Edge Function secret** (Dashboard → Edge Functions → Secrets) — set by the owner |
+| `APEX_AI_MODEL` | Edge Function secret, optional (default `gpt-5-mini`) |
+| `APEX_AI_CORS_ORIGINS` / `APEX_AI_REGISTRATION` | defaults `none` / `open`; override with Edge Function secrets |
+
+The function is deployed with `verify_jwt = false` because it authenticates every AI request
+itself (APEX access tokens); `/healthz` and `/readyz` are public by design and reveal only check
+names.
+
+**Deploy / redeploy**
+
+1. `npm run ai:build:edge` → `supabase/functions/apex-ai/index.js` (generated; openai/pg are pinned
+   `npm:` imports; migrations embedded). Commit and push it.
+2. Deploy the function `apex-ai` with this one-file entry (`index.ts`), pinned to that commit:
+   `import 'https://raw.githubusercontent.com/darshchandran/ApexFitnessApp/<commit>/supabase/functions/apex-ai/index.js';`
+   (Supabase CLI: `supabase functions deploy apex-ai --no-verify-jwt` with the same entry; or the
+   Supabase MCP `deploy_edge_function`.) Supabase bundles the import at deploy time.
+3. On first start the function applies pending migrations (advisory lock, `apex_migrations`).
+4. Check `GET …/apex-ai/readyz` → 200, then run the live smoke test (§6).
+
+**One-time setup (already done for `apex-ai`)** — the token-signing secret, generated in the database:
+
+```sql
+select vault.create_secret(encode(extensions.gen_random_bytes(48), 'base64'), 'apex_auth_secret',
+  'Signs APEX AI access tokens. Generated in-database; never displayed.')
+where not exists (select 1 from vault.secrets where name = 'apex_auth_secret');
+```
+
+Rotating it (`vault.update_secret`) signs every device out of its current access token; devices
+refresh automatically. Logs: Dashboard → Edge Functions → apex-ai → Logs (one JSON line per event).
+
+The sections below describe the same backend as a Node container for any other host.
+
 ## 1. Backend environment (server only — never `EXPO_PUBLIC_`)
 
 | Variable | Production value | Notes |
@@ -90,6 +140,9 @@ EXPO_PUBLIC_APEX_AI_URL=https://<your-backend> npm run export:production   # web
   for curl that only a development server accepts.
 
 ## 6. Live validation (after every production deploy)
+
+For Supabase the backend URL is `https://gbknsjfbtdfvazhhrtsn.supabase.co/functions/v1/apex-ai`; a
+restart is a redeploy of the function (§0).
 
 ```bash
 npm run ai:smoke -- --url https://<your-backend>                       # health, real OpenAI answers, actions, isolation, failures, rate limits

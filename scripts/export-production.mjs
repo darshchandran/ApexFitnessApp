@@ -20,6 +20,7 @@ const run = (cmd, args, shell = false) => {
   if (r.status !== 0) process.exit(r.status ?? 1);
 };
 rmSync('dist', { recursive: true, force: true });
-run('npx', ['expo', 'export', '-p', 'web', '-p', 'android'], process.platform === 'win32'); // npx is a .cmd on Windows
+// --clear: Metro caches transformed files, including inlined EXPO_PUBLIC_ values from an earlier export
+run('npx', ['expo', 'export', '--clear', '-p', 'web', '-p', 'android'], process.platform === 'win32'); // npx is a .cmd on Windows
 run(process.execPath, ['scripts/scan-bundle.mjs', 'dist', '--expect', url]);
 console.log(`Production client exported to dist/ for ${url}`);
