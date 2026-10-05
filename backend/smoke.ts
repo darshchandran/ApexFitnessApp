@@ -4,7 +4,8 @@
 //   npm run ai:smoke -- --url https://ai.example.com            all live checks (~2 min)
 //   npm run ai:smoke -- --url … --phase restart-before           then restart/redeploy the backend, then:
 //   npm run ai:smoke -- --url … --phase restart-after
-//   options: --slow (waits 5 min to test action expiry)  --registration-limit (registers until 429)
+//   npm run ai:smoke -- --url … --phase client                  the app's own AI client code end to end
+//   options: --slow (action + access-token expiry, ~15 min)  --registration-limit (registers until 429)
 //
 // It uses throwaway install identities and synthetic athlete data built with APEX's own seed and
 // services (no real athlete data), revokes those identities at the end, and prints request ids so
@@ -15,6 +16,8 @@ import { join } from 'node:path';
 import { memoryStore, writeAll } from '../src/data/store';
 import { seedData } from '../src/domain/seed';
 import type { ApexData } from '../src/domain/types';
+import { aiServerUrl, createAssistant, type ApexMessage } from '../src/services/ai';
+import { memorySecrets } from '../src/services/aiSession';
 import { createApex, todayOverview, type ActionChanges } from '../src/services/apex';
 
 const arg = (name: string) => {
@@ -183,19 +186,38 @@ async function all() {
     }
   });
 
-  await check('cancelled action cannot be confirmed', async () => {
+  await check("cancelled action cannot be confirmed (and B cannot touch A's pending action)", async () => {
     const act = await proposeBasketball(A, await phone(), 'propose-cancel', 45, 5);
-    must((await cancel(A, act.id, 'cancel')).status === 200, 'cancel failed');
+    for (const r of [await confirm(B, act.id, p, 'isolation-pending-confirm'), await cancel(B, act.id, 'isolation-pending-cancel')]) {
+      must(r.status === 404 && r.json?.error?.code === 'not_found' && !r.json?.action, `B got ${code(r)} for A's pending action`);
+    }
+    must((await cancel(A, act.id, 'cancel')).status === 200, "cancel failed (B's attempts must not have changed it)");
     must(code(await confirm(A, act.id, p, 'confirm-cancelled')) === 'action_cancelled', 'a cancelled action was not refused');
   });
 
   if (flag('slow')) {
-    await check('expired action cannot be confirmed (waits 5 minutes)', async () => {
-      const act = await proposeBasketball(A, p, 'propose-expire');
-      await new Promise((r) => setTimeout(r, 5 * 60_000 + 5_000));
-      must(code(await confirm(A, act.id, p, 'confirm-expired')) === 'action_expired', 'an expired action was not refused');
-    });
-  } else skip('expired action', 'run with --slow (waits 5 minutes)');
+    // both waits run at once (~15 minutes)
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    await Promise.all([
+      check('expired action cannot be confirmed (waits 5 minutes)', async () => {
+        const act = await proposeBasketball(A, p, 'propose-expire');
+        await wait(5 * 60_000 + 5_000);
+        must(code(await confirm(A, act.id, p, 'confirm-expired')) === 'action_expired', 'an expired action was not refused');
+      }),
+      check('expired access token is refused; refresh restores access (waits 15 minutes)', async () => {
+        const s = await register('register-expiry');
+        await wait(15 * 60_000 + 10_000);
+        const r = await http('POST', '/ai/chat', { message: 'hi' }, s.access, 'expired-token');
+        must(r.status === 401 && r.json?.error?.code === 'unauthorized', `an expired token answered ${code(r)}`);
+        const f = await http('POST', '/ai/auth/refresh', { refresh_token: s.refresh });
+        must(f.status === 200, `refresh after expiry answered ${code(f)}`);
+        identities.push(f.json.refresh_token);
+      }),
+    ]);
+  } else {
+    skip('expired action', 'run with --slow (waits 5 minutes)');
+    skip('expired access token', 'run with --slow (waits 15 minutes)');
+  }
 
   await check('invalid and malformed access tokens are refused', async () => {
     for (const t of ['garbage', `${A.access}x`, 'v1.e30.e30']) must((await http('POST', '/ai/chat', { message: 'hi' }, t)).status === 401, 'a bad token was accepted');
@@ -208,7 +230,13 @@ async function all() {
     must((await http('POST', '/ai/auth/refresh', { refresh_token: s.refresh })).status === 401, 'a spent refresh token was accepted');
     must((await http('POST', '/ai/auth/refresh', { refresh_token: first.json.refresh_token })).status === 401, 'the lineage was not revoked');
   });
-  skip('expired access token', 'needs 15 minutes; covered by the automated suite');
+  await check('malformed requests are refused with a safe 400', async () => {
+    for (const body of ['{not json', JSON.stringify({ message: 'x', conversation_id: 'c', context: { today: 'no' } }), '{"message":"x","conversation_id":"c","__proto__":{"a":1}}']) {
+      const r = await http('POST', '/ai/chat', body, A.access, 'malformed');
+      must(r.status === 400 && r.json?.error?.code === 'invalid_request', `malformed body answered ${code(r)}`);
+      must(!/at \w+ \(|stack|postgres|sql/i.test(JSON.stringify(r.json)), 'the error exposed internals');
+    }
+  });
 
   // rate limits at their production values: invalid bodies are counted before validation, so no model cost
   await check('chat rate limit returns 429', async () => {
@@ -221,7 +249,12 @@ async function all() {
   await check('confirm/cancel rate limit returns 429', async () => {
     for (let i = 0; i < 200; i++) {
       const r = await http('POST', `/ai/actions/${crypto.randomUUID()}/cancel`, {}, B.access);
-      if (r.status === 429) return `429 after ${i + 1} requests`;
+      if (r.status === 429) {
+        // confirm shares the per-athlete action limit
+        const c = await http('POST', `/ai/actions/${crypto.randomUUID()}/confirm`, { context: ctx(p) }, B.access);
+        must(c.status === 429, `confirm after the limit answered ${code(c)}`);
+        return `cancel: 429 after ${i + 1} requests; confirm: 429`;
+      }
     }
     throw new Error('no 429 within 200 requests');
   });
@@ -275,13 +308,73 @@ async function restartAfter() {
   rmSync(STATE, { force: true });
 }
 
+/**
+ * The production app's flow with the app's own client code (src/services/ai.ts + the APEX data
+ * service), wired as the production build wires it: built-in address, secure-store-like secrets,
+ * conversation storage. Only the screen is missing — this drives what its buttons call.
+ */
+async function clientFlow() {
+  const p = await phone();
+  const chatStore = memoryStore(); // AsyncStorage on the device
+  const secrets = memorySecrets(); // the Keychain / Keystore on the device
+  const open = () => createAssistant({ store: chatStore, apex: p.app, secrets, defaultUrl: aiServerUrl(BASE, false) });
+  let ai = open();
+  const last = () => ai.getState().messages.at(-1) as ApexMessage | undefined;
+  const ask = async (text: string) => {
+    must(await ai.send(text), `no answer (${JSON.stringify(ai.getState().messages.at(-1))?.slice(0, 160)})`);
+    must(last()?.role === 'apex' && last()!.text.length > 0, 'empty answer');
+    return last()!;
+  };
+
+  await check('client: a production build uses this address and signs in', async () => {
+    must(aiServerUrl(BASE, false) === BASE, 'a production build would ignore this address');
+    await ai.init();
+    must(ai.getState().connection?.url === BASE && !ai.getState().authFailed, 'not connected');
+  });
+  for (const [label, q] of [['today', "What's my training plan today?"], ['load', 'How has my training load been recently?'], ['progression', 'How am I progressing on my lifts?']] as const) {
+    await check(`client: real AI answer — ${label}`, async () => `checked: ${(await ask(q)).checked.join(', ') || 'nothing'}`);
+  }
+  await check('client: basketball — propose, confirm, applied once, duplicate confirm ignored', async () => {
+    const m = await ask('Log basketball for today: 55 minutes, RPE 7.');
+    must(m.action?.type === 'log_basketball' && m.action.state === 'pending', 'no log_basketball proposal (model behaviour)');
+    await ai.confirm(m.id);
+    must(ai.getState().messages.find((x) => x.id === m.id)?.role === 'apex', 'message lost');
+    const a = (ai.getState().messages.find((x) => x.id === m.id) as ApexMessage).action!;
+    must(a.state === 'executed', `action ${a.state}: ${a.note ?? ''}`);
+    must(p.app.getState().data.basketball.length === 1, 'not exactly one session on the device');
+    await ai.confirm(m.id);
+    must(p.app.getState().data.basketball.length === 1, 'a second confirm duplicated the session');
+  });
+  await check('client: reload keeps the session, the conversation and the sign-in', async () => {
+    await Promise.all([ai.flush(), p.app.flush()]);
+    const app = createApex(p.store, () => new Date());
+    await app.init();
+    must(app.getState().data.basketball.length === 1, 'the session did not survive a reload');
+    ai = open();
+    await ai.init();
+    const executed = ai.getState().messages.find((x) => x.role === 'apex' && x.action?.type === 'log_basketball') as ApexMessage | undefined;
+    must(executed?.action?.state === 'executed', 'the confirmed action did not survive a reload');
+    await ask('Thanks. Anything else to note for today?');
+  });
+  await check('client: new conversation starts clean and works', async () => {
+    const before = ai.getState().conversationId;
+    await ai.newConversation();
+    must(ai.getState().messages.length === 0, 'old messages kept');
+    await ask('What is my readiness today?');
+    must(ai.getState().conversationId !== before, 'the conversation id was reused');
+    must(p.app.getState().data.basketball.length === 1, 'a new conversation changed athlete data');
+  });
+  await ai.disconnect().catch(() => undefined); // signs this install out (revokes its session)
+}
+
 async function main() {
-  if (!/^https?:\/\/[^\s/]+$/.test(BASE)) {
+  if (!/^https?:\/\/[^\s/?#]+(\/[^\s?#]*)?$/.test(BASE)) {
     console.error('Usage: npm run ai:smoke -- --url https://<apex-ai-backend> [--phase all|restart-before|restart-after] [--slow] [--registration-limit]');
     process.exit(2);
   }
   if (PHASE === 'restart-before') await restartBefore();
   else if (PHASE === 'restart-after') await restartAfter();
+  else if (PHASE === 'client') await clientFlow();
   else await all();
 
   // clean up: revoke every test session this run created (actions expire and are purged by the server)
