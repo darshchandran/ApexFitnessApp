@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { memoryStore } from '../../data/store';
 import { createApex } from '../apex';
-import { CONNECTION_KEY, CONVERSATION_KEY, createAssistant, MAX_MESSAGE, type ApexMessage, type UserMessage } from '../ai';
+import { aiServerUrl, CONNECTION_KEY, CONVERSATION_KEY, createAssistant, MAX_MESSAGE, type ApexMessage, type UserMessage } from '../ai';
 import { memorySecrets, REFRESH_KEY } from '../aiSession';
 
 const NOW = new Date(2026, 9, 7, 18);
@@ -252,3 +252,14 @@ describe('sign-in', () => {
     expect(calls).toBe(1);
   });
 });
+
+describe('the production AI address', () => {
+  it('production builds use only an https server that is not on this machine; development uses what it is given', () => {
+    expect(aiServerUrl('https://ai.apex.example/', false)).toBe('https://ai.apex.example');
+    for (const bad of ['http://ai.apex.example', 'https://localhost:8787', 'https://127.0.0.1', 'https://192.168.1.20', 'https://ai.apex.example/path', 'ftp://x', '', undefined]) {
+      expect(aiServerUrl(bad, false)).toBeUndefined();
+    }
+    expect(aiServerUrl('http://localhost:8787', true)).toBe('http://localhost:8787');
+  });
+});
+

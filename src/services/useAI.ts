@@ -2,7 +2,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
-import { createAssistant } from './ai';
+import { aiServerUrl, createAssistant } from './ai';
 import { memorySecrets, type SecretStore } from './aiSession';
 import { apex } from './useApex';
 
@@ -20,7 +20,7 @@ const secrets: SecretStore = Platform.OS === 'web'
   };
 
 /** The app's APEX AI client. The server address comes from the build; there are no credentials in it. */
-export const assistant = createAssistant({ store: AsyncStorage, apex, secrets, defaultUrl: process.env.EXPO_PUBLIC_APEX_AI_URL });
+export const assistant = createAssistant({ store: AsyncStorage, apex, secrets, defaultUrl: aiServerUrl(process.env.EXPO_PUBLIC_APEX_AI_URL, __DEV__) });
 
 let started: Promise<void> | undefined;
 export const startAssistant = () => (started ??= assistant.init());

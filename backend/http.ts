@@ -1,6 +1,6 @@
 // node:http → the AI routes (Request/Response). Used by server.ts and the integration tests.
 import { createServer, type IncomingMessage } from 'node:http';
-import { route, type ChatDeps } from './ai/handler';
+import { readiness, route, type ChatDeps } from './ai/handler';
 
 const notFound = JSON.stringify({ error: { code: 'not_found', message: 'Not found.' } });
 const tooLarge = JSON.stringify({ error: { code: 'payload_too_large', message: 'That request is too large.' } });
@@ -26,6 +26,11 @@ export const createAIServer = (deps: ChatDeps, { corsOrigins = [] as string[], t
     return origin && corsOrigins.includes(origin) ? { 'access-control-allow-origin': origin, vary: 'origin' } : {};
   };
   return createServer(async (req, res) => {
+    // liveness (the process answers) and readiness (it can serve): for the host's health checks
+    if (req.method === 'GET' && (req.url === '/healthz' || req.url === '/readyz')) {
+      const r = req.url === '/healthz' ? { status: 200, body: { status: 'ok' } } : await readiness(deps);
+      return res.writeHead(r.status, { 'content-type': 'application/json', 'cache-control': 'no-store' }).end(JSON.stringify(r.body));
+    }
     if (!req.url?.startsWith('/ai/')) return res.writeHead(404, { 'content-type': 'application/json' }).end(notFound);
     if (req.method === 'OPTIONS') {
       const allowed = cors(req);

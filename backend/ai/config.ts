@@ -83,6 +83,10 @@ export interface ServerConfig {
   authSecret: string;
   /** Required in production. In development, unset = the built-in local Postgres. */
   databaseUrl: string | undefined;
+  /** TLS to the database: required in production (certificate verified). */
+  databaseSsl: 'require' | 'disable';
+  /** Extra CA to trust for the database certificate (Supabase's CA): PEM text or a file path. */
+  databaseCaCert: string | undefined;
   /** Exact browser origins allowed to call the API. Native apps send none and need none. */
   corsOrigins: string[];
   /** open = new devices may register an athlete identity; closed = only existing identities. */
@@ -134,6 +138,12 @@ export function loadServerConfig(env: Env = process.env): ServerConfig {
   const databaseUrl = env.DATABASE_URL?.trim() || undefined;
   if (databaseUrl && !/^postgres(ql)?:\/\//.test(databaseUrl)) problems.push('DATABASE_URL must be a postgres:// connection string');
   if (prod && !databaseUrl) problems.push('DATABASE_URL is required in production');
+  // sslmode in the URL would silently override the TLS settings below
+  if (databaseUrl && /[?&]sslmode=/i.test(databaseUrl)) problems.push('DATABASE_URL must not contain sslmode — use DATABASE_SSL (and DATABASE_CA_CERT)');
+  const databaseSsl = env.DATABASE_SSL ?? (prod ? undefined : 'disable');
+  if (databaseSsl !== 'require' && databaseSsl !== 'disable') problems.push('DATABASE_SSL must be "require" or "disable"');
+  if (prod && databaseSsl !== 'require') problems.push('DATABASE_SSL must be "require" in production');
+  const databaseCaCert = env.DATABASE_CA_CERT?.trim() || undefined;
 
   const corsOrigins = origins(env.APEX_AI_CORS_ORIGINS, prod, problems);
 
@@ -153,6 +163,9 @@ export function loadServerConfig(env: Env = process.env): ServerConfig {
   }
 
   if (problems.length) throw new ConfigError(problems);
-  return { env: mode, authSecret: secret, databaseUrl, corsOrigins, registration: registration as 'open' | 'closed', trustProxy: env.APEX_TRUST_PROXY === '1', ai };
+  return {
+    env: mode, authSecret: secret, databaseUrl, databaseSsl: databaseSsl as 'require' | 'disable', databaseCaCert, corsOrigins,
+    registration: registration as 'open' | 'closed', trustProxy: env.APEX_TRUST_PROXY === '1', ai,
+  };
 }
 

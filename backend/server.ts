@@ -2,7 +2,7 @@
 // APEX_ENV must say development or production; production refuses to start without real
 // credentials, a database, explicit CORS and an explicit registration policy.
 import OpenAI from 'openai';
-import { migrate, pgDb, type Db } from './db/db';
+import { loadCa, migrate, pgDb, type Db } from './db/db';
 import { ConfigError, loadServerConfig } from './ai/config';
 import { createDeps } from './ai/handler';
 import type { ResponsesClient } from './ai/service';
@@ -18,13 +18,14 @@ async function main() {
 
   let db: Db;
   if (config.databaseUrl) {
-    db = pgDb(config.databaseUrl, { ssl: process.env.DATABASE_SSL === 'require' });
+    db = pgDb(config.databaseUrl, { tls: config.databaseSsl === 'require' ? { ca: loadCa(config.databaseCaCert) } : undefined });
   } else {
     // development only (production requires DATABASE_URL): a local Postgres kept in .data/
-    const { startLocalPostgres } = await import('./db/local');
+    const { startLocalPostgres } = await import('./db/local.js');
     const local = await startLocalPostgres({ dataDir: '.data/ai-db' });
     db = pgDb(local.url, { max: 5 });
   }
+  // migrations run before the server listens; if they fail, the process exits and never serves an old schema
   const applied = await migrate(db);
 
   const deps = createDeps(config, db, (apiKey) => new OpenAI({ apiKey, maxRetries: 1 }) as unknown as ResponsesClient);

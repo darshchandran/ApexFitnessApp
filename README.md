@@ -68,7 +68,12 @@ cp .env.example .env    # APEX_ENV=development, APEX_AUTH_SECRET (+ OPENAI_API_K
 npm run ai:server       # http://127.0.0.1:8787 — a local Postgres (PGlite) in .data/ai-db unless DATABASE_URL is set
 npm run ai:migrate      # apply supabase/migrations to DATABASE_URL (the server also applies them on start)
 npm run ai:token -- dev_athlete 1   # DEVELOPMENT ONLY: a dev1 token for curl; refused by production servers
+npm run ai:build        # production build → build/server (or `docker build .`); GET /healthz, /readyz
+npm run ai:smoke -- --url https://<backend>   # live checks against a deployed backend
+EXPO_PUBLIC_APEX_AI_URL=https://<backend> npm run export:production   # production clients + bundle scan
 ```
+
+**Deploying:** see [DEPLOY.md](DEPLOY.md) — environment contract, Supabase, container, health checks, mobile configuration, registration policy and live validation.
 
 ```
 backend/server.ts       config (production guards) → Postgres → migrations → HTTP
@@ -89,7 +94,7 @@ supabase/migrations/    the schema (RLS on, closed to Supabase's anon/authentica
 
 **In the app:** APEX AI (chat icon in the Home header). Production builds set `EXPO_PUBLIC_APEX_AI_URL` (an address, not a secret); development builds without it can enter a server address. Nobody types a token. The web build's origin must be listed in `APEX_AI_CORS_ORIGINS`.
 
-**Production checklist:** `APEX_ENV=production`, a real `OPENAI_API_KEY`, `APEX_AI_MODEL`, a random `APEX_AUTH_SECRET`, `DATABASE_URL` (Supabase: the server/service connection, `DATABASE_SSL=require`), `APEX_AI_CORS_ORIGINS` (https origins or `none`), `APEX_AI_REGISTRATION`, and `APEX_TRUST_PROXY=1` only behind a proxy that sets X-Forwarded-For. Build the app with `EXPO_PUBLIC_APEX_AI_URL=https://…`.
+**Production checklist:** see [DEPLOY.md](DEPLOY.md).
 
 Conversation memory (a few recent text turns) is kept in each server's memory on purpose — no conversation text is stored; with several instances a conversation may lose earlier context, never data.
 

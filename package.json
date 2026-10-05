@@ -59,7 +59,12 @@
     "typecheck": "tsc --noEmit",
     "ai:server": "tsx backend/server.ts",
     "ai:token": "tsx backend/token.ts",
-    "ai:migrate": "tsx backend/migrate.ts"
+    "ai:migrate": "tsx backend/migrate.ts",
+    "ai:build": "node backend/build.mjs",
+    "ai:start": "node build/server/backend/server.js",
+    "export:production": "node scripts/export-production.mjs",
+    "scan:bundle": "node scripts/scan-bundle.mjs dist",
+    "ai:smoke": "tsx backend/smoke.ts"
   },
   "private": true,
   "jest": {

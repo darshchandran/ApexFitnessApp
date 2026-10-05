@@ -209,7 +209,7 @@ function ServerSetup({ assistant }: { assistant: Assistant }) {
     <ScrollView contentContainerStyle={{ padding: GUTTER, gap: S.md }} keyboardShouldPersistTaps="handled">
       <Txt v="overline">APEX AI server</Txt>
       <Txt v="body" color={C.text2}>Development build: enter the APEX AI server to use. This device signs itself in — there is nothing else to enter.</Txt>
-      <TextInput value={url} onChangeText={setUrl} placeholder="http://localhost:8787" placeholderTextColor={C.text3} autoCapitalize="none" autoCorrect={false}
+      <TextInput value={url} onChangeText={setUrl} placeholder={__DEV__ ? 'http://localhost:8787' : undefined} placeholderTextColor={C.text3} autoCapitalize="none" autoCorrect={false}
         keyboardType="url" style={styles.field} accessibilityLabel="APEX AI server address" onSubmitEditing={submit} />
       {bad && <Txt v="bodySm" color={C.danger}>Enter the server address, starting with http:// or https://.</Txt>}
       <Button label="Use this server" onPress={submit} disabled={!url.trim()} />

@@ -1,6 +1,6 @@
 // `npm run ai:migrate` — applies supabase/migrations to DATABASE_URL (deploy step; the server also
 // applies them on start). Idempotent. On Supabase, `supabase db push` applies the same files.
-import { migrate, pgDb } from './db/db';
+import { loadCa, migrate, pgDb } from './db/db';
 
 async function main() {
   try {
@@ -10,7 +10,7 @@ async function main() {
   }
   const url = process.env.DATABASE_URL;
   if (!url || !/^postgres(ql)?:\/\//.test(url)) throw new Error('DATABASE_URL must be a postgres:// connection string');
-  const db = pgDb(url, { max: 1, ssl: process.env.DATABASE_SSL === 'require' });
+  const db = pgDb(url, { max: 1, tls: process.env.DATABASE_SSL === 'require' ? { ca: loadCa(process.env.DATABASE_CA_CERT) } : undefined });
   try {
     const applied = await migrate(db);
     console.info(JSON.stringify({ event: 'ai.migrate', applied }));

@@ -1,0 +1,16 @@
+{
+  "//": "Production build of the APEX AI backend: npm run ai:build → build/server (plain Node, CommonJS).",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "node16",
+    "moduleResolution": "node16",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "..",
+    "outDir": "../build/server"
+  },
+  "files": ["server.ts", "migrate.ts"]
+}

@@ -322,6 +322,18 @@ describe('restart (actions live in the database)', () => {
   });
 });
 
+describe('health endpoints over HTTP', () => {
+  it('/healthz says the process is alive; /readyz says it can serve; nothing else is exposed', async () => {
+    const live = await nodeFetch(`${apex.url}/healthz`);
+    expect([live.status, await live.json()]).toEqual([200, { status: 'ok' }]);
+    const ready = await nodeFetch(`${apex.url}/readyz`);
+    expect([ready.status, await ready.json()]).toEqual([200, { status: 'ready', checks: { database: 'ok', schema: 'current', auth: 'configured', model: 'configured' } }]);
+    expect(ready.headers.get('cache-control')).toBe('no-store');
+    expect((await nodeFetch(`${apex.url}/healthz`, { method: 'POST' })).status).toBe(404);
+    expect((await nodeFetch(`${apex.url}/`)).status).toBe(404);
+  });
+});
+
 describe('web build access (CORS)', () => {
   it('only allow-listed browser origins get CORS headers; native requests need none', async () => {
     const deps = createDeps(loadServerConfig(env()), lazyDb(), makeClient, () => undefined);

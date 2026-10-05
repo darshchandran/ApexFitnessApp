@@ -5,11 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
 import { join } from 'node:path';
-import { migrate, MIGRATIONS_DIR } from '../../db/db';
+import { loadCa, migrate, MIGRATIONS_DIR, pendingMigrations } from '../../db/db';
 import { clientAddress } from '../../http';
 import { ACCESS_TTL_SEC } from '../auth';
 import { ConfigError, loadServerConfig } from '../config';
-import { route, type ChatDeps } from '../handler';
+import { readiness, route, type ChatDeps } from '../handler';
 import { signToken } from '../security';
 import { argumentsHash } from '../store';
 import { callTool, device, NOW, res, say, SECRET, snapshot, testActions, testClock, testDb, testDeps, TODAY, token, type Body } from '../test-utils';
@@ -38,7 +38,7 @@ const cancel = (deps: ChatDeps, id: string, user = 'athlete_1') => call(deps, `/
 const bbId = (r: { json: { result?: { result?: { basketball_sessions?: { id: string }[] } } } }) => r.json.result?.result?.basketball_sessions?.[0]?.id;
 
 const PROD = {
-  APEX_ENV: 'production', APEX_AUTH_SECRET: 'k8#Qz!m2Lr9@vX4$pT7&wN1*eB6^cY3%hJ5', DATABASE_URL: 'postgres://apex@db.internal:5432/apex',
+  APEX_ENV: 'production', APEX_AUTH_SECRET: 'k8#Qz!m2Lr9@vX4$pT7&wN1*eB6^cY3%hJ5', DATABASE_URL: 'postgres://apex@db.internal:5432/apex', DATABASE_SSL: 'require',
   APEX_AI_CORS_ORIGINS: 'https://app.apex.example', APEX_AI_REGISTRATION: 'open', OPENAI_API_KEY: 'sk-proj-abcdefghijklmnopqrstuvwxyz012345', APEX_AI_MODEL: 'gpt-5.1',
 };
 const problems = (env: Record<string, string | undefined>) => {
@@ -73,6 +73,9 @@ describe('production configuration guards', () => {
       [{ APEX_AI_CORS_ORIGINS: 'http://app.apex.example' }, /https:\/\/ origins in production/],
       [{ APEX_AI_CORS_ORIGINS: 'https://app.apex.example/path' }, /not an origin/],
       [{ APEX_AI_REGISTRATION: undefined }, /APEX_AI_REGISTRATION .*required in production/],
+      [{ DATABASE_SSL: undefined }, /DATABASE_SSL must be "require" in production/],
+      [{ DATABASE_SSL: 'disable' }, /DATABASE_SSL must be "require" in production/],
+      [{ DATABASE_URL: 'postgres://apex@db.internal:5432/apex?sslmode=disable' }, /must not contain sslmode/],
     ];
     for (const [patch, msg] of cases) {
       const p = problems({ ...PROD, ...patch });
@@ -105,6 +108,43 @@ describe('production configuration guards', () => {
       devDeps.now = () => new Date();
       expect((await call(devDeps, '/ai/chat', { message: 'hi', context: { today: new Date().toISOString().slice(0, 10) } }, devToken)).status).toBe(200);
     })();
+  });
+});
+
+describe('database TLS and readiness', () => {
+  it('a CA can be given as PEM text (one-line env var) or as a file', () => {
+    const pem = '-----BEGIN CERTIFICATE-----\\nMIIB\\n-----END CERTIFICATE-----';
+    expect(loadCa(pem)).toBe('-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----');
+    expect(loadCa(undefined)).toBeUndefined();
+    expect(loadCa(join(ROOT, '.env.example'))).toContain('APEX_ENV');
+    expect(loadServerConfig({ ...PROD, DATABASE_CA_CERT: 'ca.pem' })).toMatchObject({ databaseSsl: 'require', databaseCaCert: 'ca.pem' });
+  });
+
+  it('readiness reports database, schema, auth and model by name; an unreachable database is a 503 with no details', async () => {
+    const { deps } = testDeps(() => say('x'));
+    expect(await readiness(deps)).toEqual({ status: 200, body: { status: 'ready', checks: { database: 'ok', schema: 'current', auth: 'configured', model: 'configured' } } });
+    const down = Object.assign(new Error('connect ECONNREFUSED 10.0.0.5:5432 password=hunter2'), { code: 'ECONNREFUSED' });
+    deps.db = { query: () => Promise.reject(down), tx: () => Promise.reject(down), close: async () => undefined };
+    const r = await readiness(deps);
+    expect(r).toEqual({ status: 503, body: { status: 'not_ready', checks: { database: 'unreachable', schema: 'unknown', auth: 'configured', model: 'configured' } } });
+    // requests during a database outage: "unavailable, try again" — never the error itself
+    deps.rate = { take: () => Promise.reject(down) } as never;
+    for (const [path, body, auth] of [['/ai/auth/register', {}, null], ['/ai/chat', { message: 'hi' }, token()]] as const) {
+      const res = await call(deps, path, body, auth);
+      expect([res.status, res.json.error.code]).toEqual([503, 'ai_unavailable']);
+      expect(JSON.stringify(res.json)).not.toMatch(/10\.0\.0\.5|hunter2|ECONNREFUSED/);
+    }
+  });
+
+  it('readiness fails when migrations are pending or the model is missing in production', async () => {
+    const { deps } = testDeps(() => say('x'));
+    deps.ai = null;
+    expect((await readiness(deps)).body.checks.model).toBe('missing');
+    expect((await readiness(deps)).status).toBe(503);
+    deps.env = 'development';
+    expect((await readiness(deps)).status).toBe(200); // development may run without a model
+    const db = await testDb();
+    expect(await pendingMigrations(db)).toEqual([]);
   });
 });
 

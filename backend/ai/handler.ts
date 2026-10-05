@@ -9,7 +9,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { ApexData, ISODate } from '../../src/domain/types';
 import { daysBetween } from '../../src/domain/util';
-import type { Db } from '../db/db';
+import { pendingMigrations, type Db } from '../db/db';
 import { ACTIONS, ActionRejected, resultMessage, simulate, type ActionResult } from './actions';
 import { refreshSession, registerDevice, revokeSession } from './auth';
 import { DEFAULT_LIMITS, type AILimits, type Environment, type ServerConfig } from './config';
@@ -44,6 +44,30 @@ export function createDeps(config: ServerConfig, db: Db, makeClient: (apiKey: st
     data: snapshotSource, logger, limits: config.ai?.limits ?? DEFAULT_LIMITS,
   };
 }
+
+/**
+ * GET /readyz: can this instance serve? Database reachable, schema current, auth and (in
+ * production) the model configured. Names only — never a value, a host or an error message.
+ */
+export async function readiness(deps: ChatDeps): Promise<{ status: number; body: { status: 'ready' | 'not_ready'; checks: Record<string, string> } }> {
+  const checks: Record<string, string> = { database: 'unreachable', schema: 'unknown', auth: deps.secret ? 'configured' : 'missing', model: deps.ai ? 'configured' : 'missing' };
+  try {
+    checks.schema = (await pendingMigrations(deps.db)).length ? 'migrations_pending' : 'current';
+    checks.database = 'ok';
+  } catch {
+    // unreachable: reported by name only
+  }
+  const ready = checks.database === 'ok' && checks.schema === 'current' && checks.auth === 'configured' && (deps.env !== 'production' || checks.model === 'configured');
+  return { status: ready ? 200 : 503, body: { status: ready ? 'ready' : 'not_ready', checks } };
+}
+
+/** A database that can't be reached is a temporary outage (503, try again), not an internal error. */
+const DB_DOWN = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EAI_AGAIN', '57P01', '57P03', '08000', '08001', '08003', '08006']);
+const unavailable = (e: unknown) => {
+  const code = (e as { code?: unknown })?.code;
+  const message = String((e as { message?: unknown })?.message ?? '');
+  return (typeof code === 'string' && DB_DOWN.has(code)) || /timeout exceeded when trying to connect|Connection terminated|Query read timeout/i.test(message);
+};
 
 const ACTION_PATH = /^\/ai\/actions\/([0-9a-f-]{36})\/(confirm|cancel)$/;
 const AUTH_PATH = /^\/ai\/auth\/(register|refresh|revoke)$/;
@@ -157,9 +181,10 @@ export async function handleAuth(req: Request, deps: ChatDeps, op: 'register' | 
     }
     const pair = await refreshSession(deps.db, deps.secret, token, now);
     return pair ? reply(200, pair) : fail('unauthorized');
-  } catch {
-    ctx.log({ event: 'ai.error', where: `auth.${op}`, category: 'internal' });
-    return fail('internal');
+  } catch (e) {
+    const down = unavailable(e);
+    ctx.log({ event: 'ai.error', where: `auth.${op}`, category: down ? 'database_unavailable' : 'internal' });
+    return fail(down ? 'ai_unavailable' : 'internal');
   }
 }
 
@@ -194,8 +219,9 @@ export async function handleChat(req: Request, deps: ChatDeps, ctx: Ctx = { rid:
     return reply(200, out);
   } catch (e) {
     if (e instanceof AIError) return fail(e.code);
-    ctx.log({ event: 'ai.error', where: 'chat', category: 'internal' });
-    return fail('internal');
+    const down = unavailable(e);
+    ctx.log({ event: 'ai.error', where: 'chat', category: down ? 'database_unavailable' : 'internal' });
+    return fail(down ? 'ai_unavailable' : 'internal');
   }
 }
 
@@ -288,8 +314,9 @@ export async function handleAction(req: Request, deps: ChatDeps, id: string, op:
       deps.ai?.conversations.add(user, recorded.conversationId, [{ role: 'assistant', content: resultMessage(recorded, result) }]);
     }
     return outcome(recorded);
-  } catch {
-    ctx.log({ event: 'ai.error', where: op, category: 'internal' });
-    return fail('internal');
+  } catch (e) {
+    const down = unavailable(e);
+    ctx.log({ event: 'ai.error', where: op, category: down ? 'database_unavailable' : 'internal' });
+    return fail(down ? 'ai_unavailable' : 'internal');
   }
 }

@@ -15,8 +15,25 @@ export interface Db extends Queryable {
   close(): Promise<void>;
 }
 
-export function pgDb(connectionString: string, opts: { max?: number; ssl?: boolean; idleMs?: number } = {}): Db {
-  const pool = new pg.Pool({ connectionString, max: opts.max ?? 10, idleTimeoutMillis: opts.idleMs ?? 10_000, allowExitOnIdle: true, ...(opts.ssl && { ssl: { rejectUnauthorized: true } }) });
+/** TLS for the pool: always certificate-verified; `ca` adds a trusted CA (e.g. Supabase's). */
+export interface DbTls {
+  ca?: string;
+}
+
+/** A CA given as PEM text (\\n escapes allowed, for one-line env vars) or as a path to a PEM file. */
+export const loadCa = (value: string | undefined) =>
+  !value ? undefined : value.includes('-----BEGIN') ? value.replace(/\\n/g, '\n') : readFileSync(value, 'utf8');
+
+export function pgDb(connectionString: string, opts: { max?: number; tls?: DbTls; idleMs?: number } = {}): Db {
+  const pool = new pg.Pool({
+    connectionString,
+    max: opts.max ?? 10,
+    idleTimeoutMillis: opts.idleMs ?? 10_000,
+    connectionTimeoutMillis: 10_000, // an unreachable database fails a request instead of hanging it
+    query_timeout: 15_000,
+    allowExitOnIdle: true,
+    ...(opts.tls && { ssl: { rejectUnauthorized: true, ...(opts.tls.ca && { ca: opts.tls.ca }) } }),
+  });
   // a dropped idle connection must not crash the server; the pool replaces it
   pool.on('error', () => undefined);
   const wrap = (c: { query: pg.Pool['query'] }): Queryable => ({
@@ -46,7 +63,17 @@ export function pgDb(connectionString: string, opts: { max?: number; ssl?: boole
 }
 
 /** Migrations live in supabase/migrations (the Supabase CLI applies the same files with `supabase db push`). */
-export const MIGRATIONS_DIR = join(__dirname, '..', '..', 'supabase', 'migrations');
+export const MIGRATIONS_DIR = process.env.APEX_MIGRATIONS_DIR ?? join(__dirname, '..', '..', 'supabase', 'migrations');
+
+const migrationFiles = (dir: string) => readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+
+/** Migrations not yet applied (throws if the database is unreachable). Used by the readiness check. */
+export async function pendingMigrations(db: Queryable, dir = MIGRATIONS_DIR): Promise<string[]> {
+  const t = await db.query<{ ok: string | null }>("select to_regclass('public.apex_migrations')::text as ok");
+  if (!t.rows[0]?.ok) return migrationFiles(dir);
+  const done = new Set((await db.query<{ name: string }>('select name from public.apex_migrations')).rows.map((r) => r.name));
+  return migrationFiles(dir).filter((f) => !done.has(f));
+}
 
 /**
  * Applies pending migrations in name order, each in its own transaction, recorded in
@@ -55,7 +82,7 @@ export const MIGRATIONS_DIR = join(__dirname, '..', '..', 'supabase', 'migration
  */
 export async function migrate(db: Db, dir = MIGRATIONS_DIR): Promise<string[]> {
   await db.query('create table if not exists public.apex_migrations (name text primary key, applied_at timestamptz not null default now())');
-  const files = readdirSync(dir).filter((f) => f.endsWith('.sql')).sort();
+  const files = migrationFiles(dir);
   const applied: string[] = [];
   for (const name of files) {
     const ran = await db.tx(async (q) => {
