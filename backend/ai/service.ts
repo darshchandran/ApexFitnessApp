@@ -79,7 +79,8 @@ function classify(e: unknown): AIError {
   const name = (e as { name?: unknown })?.name;
   if (name === 'APIConnectionTimeoutError') return new AIError('timeout', 'upstream_timeout');
   if (status === 401 || status === 403) return new AIError('ai_unavailable', 'upstream_auth');
-  if (status === 429) return new AIError('ai_unavailable', 'upstream_rate_limit');
+  // OpenAI answers 429 both for rate limits and for an account without credit: operators need to tell them apart
+  if (status === 429) return new AIError('ai_unavailable', (e as { code?: unknown })?.code === 'insufficient_quota' ? 'upstream_quota' : 'upstream_rate_limit');
   if (typeof status === 'number' && status >= 500) return new AIError('ai_unavailable', 'upstream_unavailable');
   if (typeof status === 'number') return new AIError('model_error', 'upstream_rejected');
   if (name === 'APIConnectionError') return new AIError('ai_unavailable', 'upstream_network');

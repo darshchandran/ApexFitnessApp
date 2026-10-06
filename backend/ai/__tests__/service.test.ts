@@ -90,6 +90,7 @@ describe('failures stay contained', () => {
     const fail = (e: object) => () => Promise.reject(Object.assign(new Error('upstream detail'), e));
     await rejects(testService(fail({ status: 401 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_auth');
     await rejects(testService(fail({ status: 429 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_rate_limit');
+    await rejects(testService(fail({ status: 429, code: 'insufficient_quota' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_quota');
     await rejects(testService(fail({ status: 503 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_unavailable');
     await rejects(testService(fail({ status: 400 })).ai.respond(await chat()), 'model_error', 'upstream_rejected');
     await rejects(testService(fail({ name: 'APIConnectionError' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_network');
