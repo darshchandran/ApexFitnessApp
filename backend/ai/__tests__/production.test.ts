@@ -394,8 +394,8 @@ describe('logs and migrations', () => {
   it('migrations are idempotent, close the tables to Supabase API roles, and match what the Supabase CLI applies', async () => {
     const db = await testDb();
     expect(await migrate(db)).toEqual([]);
-    for (const f of ['20261005120000_ai_production.sql']) await db.query(readFileSync(join(MIGRATIONS_DIR, f), 'utf8')); // applied again as raw SQL
-    const rls = await db.query<{ relname: string; relrowsecurity: boolean }>("select relname, relrowsecurity from pg_class where relname in ('ai_identities','ai_refresh_tokens','ai_actions','ai_rate_limits') order by 1");
-    expect(rls.rows).toEqual(['ai_actions', 'ai_identities', 'ai_rate_limits', 'ai_refresh_tokens'].map((relname) => ({ relname, relrowsecurity: true })));
+    for (const f of ['20261005120000_ai_production.sql', '20261006120000_apex_migrations_lockdown.sql']) await db.query(readFileSync(join(MIGRATIONS_DIR, f), 'utf8')); // applied again as raw SQL
+    const rls = await db.query<{ relname: string; relrowsecurity: boolean }>("select relname, relrowsecurity from pg_class where relname in ('ai_identities','ai_refresh_tokens','ai_actions','ai_rate_limits','apex_migrations') order by 1");
+    expect(rls.rows).toEqual(['ai_actions', 'ai_identities', 'ai_rate_limits', 'ai_refresh_tokens', 'apex_migrations'].map((relname) => ({ relname, relrowsecurity: true })));
   });
 });

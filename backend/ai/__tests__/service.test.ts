@@ -91,6 +91,7 @@ describe('failures stay contained', () => {
     await rejects(testService(fail({ status: 401 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_auth');
     await rejects(testService(fail({ status: 429 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_rate_limit');
     await rejects(testService(fail({ status: 429, code: 'insufficient_quota' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_quota');
+    await rejects(testService(fail({ status: 429, code: 'credit_balance_exhausted' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_quota'); // seen live
     await rejects(testService(fail({ status: 503 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_unavailable');
     await rejects(testService(fail({ status: 400 })).ai.respond(await chat()), 'model_error', 'upstream_rejected');
     await rejects(testService(fail({ name: 'APIConnectionError' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_network');
