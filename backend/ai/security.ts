@@ -51,7 +51,7 @@ export const safetyId = (userId: string) => createHash('sha256').update(`apex:${
 export type AILogEvent = (
   | { event: 'ai.request'; ok: boolean; status: number; code?: string; model?: string; latencyMs: number; rounds?: number; tools?: number }
   | { event: 'ai.tool'; tool: string; ok: boolean; error?: string; ms: number }
-  | { event: 'ai.model_error'; category: string; model: string }
+  | { event: 'ai.model_error'; category: string; model: string; upstream?: { status?: number; code?: string; limitRequests?: string; limitTokens?: string } }
   | { event: 'ai.action'; op: 'propose' | 'confirm' | 'cancel'; type?: string; ok: boolean; status?: number; code?: string; latencyMs?: number; replay?: boolean }
   | { event: 'ai.auth'; op: 'register' | 'refresh' | 'revoke'; ok: boolean; status: number; code?: string; latencyMs: number }
   | { event: 'ai.config'; problem: string }

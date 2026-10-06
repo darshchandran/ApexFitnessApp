@@ -97,7 +97,12 @@ describe('failures stay contained', () => {
     await rejects(testService(fail({ name: 'APIConnectionTimeoutError' })).ai.respond(await chat()), 'timeout');
     const { ai, logs } = testService(fail({ status: 500 }));
     await rejects(ai.respond(await chat()), 'ai_unavailable');
-    expect(logs).toEqual([{ event: 'ai.model_error', category: 'upstream_unavailable', model: 'test-model' }]);
+    expect(logs).toEqual([{ event: 'ai.model_error', category: 'upstream_unavailable', model: 'test-model', upstream: { status: 500 } }]);
+    // a 429 is logged with OpenAI's error identifier and the account's published limits — never its message
+    const limited = testService(fail({ status: 429, code: 'rate_limit_exceeded', message: 'Rate limit reached in organization org-secret', headers: new Headers({ 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-limit-requests': '500' }) }));
+    await rejects(limited.ai.respond(await chat()), 'ai_unavailable', 'upstream_rate_limit');
+    expect(limited.logs).toEqual([{ event: 'ai.model_error', category: 'upstream_rate_limit', model: 'test-model', upstream: { status: 429, code: 'rate_limit_exceeded', limitRequests: '500', limitTokens: '30000' } }]);
+    expect(JSON.stringify(limited.logs)).not.toMatch(/org-secret|upstream detail/);
   });
 
   it('times out on a hung model call and aborts it', async () => {

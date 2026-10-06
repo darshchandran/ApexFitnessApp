@@ -3978,6 +3978,12 @@ var TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 function textOf(res) {
   return res.output.flatMap((o) => o?.type === "message" && Array.isArray(o.content) ? o.content : []).map((c) => c.type === "output_text" ? c.text : c.type === "refusal" ? c.refusal : "").join("").trim();
 }
+function upstreamFacts(e) {
+  const x = e;
+  const id = [x.code, x.type].find((v) => typeof v === "string" && /^[a-z_]{1,40}$/.test(v));
+  const header = (k) => typeof x.headers?.get === "function" ? x.headers.get(k)?.match(/^\d{1,12}$/)?.[0] : void 0;
+  return { status: typeof x.status === "number" ? x.status : void 0, code: id, limitRequests: header("x-ratelimit-limit-requests"), limitTokens: header("x-ratelimit-limit-tokens") };
+}
 function classify(e) {
   const status = e?.status;
   const name = e?.name;
@@ -4080,7 +4086,7 @@ var AIService = class {
       );
     } catch (e) {
       const err = abort.signal.aborted ? new AIError("timeout") : classify(e);
-      log({ event: "ai.model_error", category: err.category, model });
+      log({ event: "ai.model_error", category: err.category, model, ...!abort.signal.aborted && { upstream: upstreamFacts(e) } });
       throw err;
     }
     if (!res || !Array.isArray(res.output) || res.status === "failed") throw this.malformed(model, log);

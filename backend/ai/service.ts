@@ -73,6 +73,18 @@ function textOf(res: ModelResponse) {
     .trim();
 }
 
+/**
+ * What OpenAI said, for operators: HTTP status, its error code (an identifier, e.g.
+ * rate_limit_exceeded) and the account's published limits — never the message, which can carry
+ * account details.
+ */
+function upstreamFacts(e: unknown) {
+  const x = e as { status?: unknown; code?: unknown; type?: unknown; headers?: { get?: (k: string) => string | null } };
+  const id = [x.code, x.type].find((v): v is string => typeof v === 'string' && /^[a-z_]{1,40}$/.test(v));
+  const header = (k: string) => (typeof x.headers?.get === 'function' ? x.headers.get(k)?.match(/^\d{1,12}$/)?.[0] : undefined);
+  return { status: typeof x.status === 'number' ? x.status : undefined, code: id, limitRequests: header('x-ratelimit-limit-requests'), limitTokens: header('x-ratelimit-limit-tokens') };
+}
+
 /** Upstream failures → a log category and the code the client sees. */
 function classify(e: unknown): AIError {
   const status = (e as { status?: unknown })?.status;
@@ -175,7 +187,7 @@ export class AIService {
       );
     } catch (e) {
       const err = abort.signal.aborted ? new AIError('timeout') : classify(e);
-      log({ event: 'ai.model_error', category: err.category, model });
+      log({ event: 'ai.model_error', category: err.category, model, ...(!abort.signal.aborted && { upstream: upstreamFacts(e) }) });
       throw err;
     }
     if (!res || !Array.isArray(res.output) || res.status === 'failed') throw this.malformed(model, log);
