@@ -214,6 +214,12 @@ async function all() {
         identities.push(f.json.refresh_token);
       }),
     ]);
+    // the waits outlived A's and B's 15-minute access tokens: refresh them, as the app does
+    for (const s of [A, B]) {
+      const r = await http('POST', '/ai/auth/refresh', { refresh_token: s.refresh });
+      if (r.status === 200) Object.assign(s, { access: r.json.access_token, refresh: r.json.refresh_token });
+      identities.push(s.refresh);
+    }
   } else {
     skip('expired action', 'run with --slow (waits 5 minutes)');
     skip('expired access token', 'run with --slow (waits 15 minutes)');
