@@ -127,6 +127,18 @@ EXPO_PUBLIC_APEX_AI_URL=https://<your-backend> npm run export:production   # web
   simply off in that build). Development builds without the variable can enter a server.
 - Store builds (EAS): set `EXPO_PUBLIC_APEX_AI_URL` in the production build profile's `env`.
   expo-secure-store is a native module, so native builds need a rebuild.
+- **Installable APK for your own phone** (local build, no store, no EAS account; needs the Android
+  SDK, JDK 17 and NDK 27.1.12297006 — React Native 0.86's pinned version):
+
+  ```bash
+  npx expo prebuild -p android --no-install     # generates android/ (git-ignored); revert its package.json script edits
+  cd android && .\gradlew.bat assembleRelease -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+  # with JAVA_HOME=<JDK 17>, NODE_ENV=production and EXPO_PUBLIC_APEX_AI_URL=https://<backend> set
+  ```
+
+  Output: `android/app/build/outputs/apk/release/app-release.apk`, signed with the template's
+  debug key — fine for side-loading, not for Google Play (that needs an upload key and an AAB).
+  Check it before sharing: unzip it and run `node scripts/scan-bundle.mjs <unzipped> --expect <url>`.
 
 ## 5. Identity and registration policy
 
