@@ -103,7 +103,8 @@ describe('failures stay contained', () => {
     await rejects(testService(fail({ name: 'APIConnectionTimeoutError' })).ai.respond(await chat()), 'timeout');
     const { ai, logs } = testService(fail({ status: 500 }));
     await rejects(ai.respond(await chat()), 'ai_unavailable');
-    expect(logs).toEqual([{ event: 'ai.model_error', category: 'upstream_unavailable', model: 'test-model', upstream: { status: 500 } }]);
+    const down = { event: 'ai.model_error', category: 'upstream_unavailable', model: 'test-model', upstream: { status: 500 } };
+    expect(logs).toEqual([down, down]); // tried once more, then refused
     // a 429 is logged with the provider's error identifier and the account's published limits — never its message
     const limited = testService(fail({ status: 429, code: 'rate_limit_exceeded', message: 'Rate limit reached in organization org-secret', headers: new Headers({ 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-limit-requests': '500' }) }));
     await rejects(limited.ai.respond(await chat()), 'ai_busy', 'upstream_rate_limit');
@@ -233,6 +234,21 @@ describe('Groq (the production provider)', () => {
     const always = groq(fail({ status: 400, code: 'tool_use_failed' }));
     await rejects(always.ai.respond(await chat()), 'model_error', 'upstream_tool_call_failed');
     expect(always.logs.filter((l) => l.event === 'ai.model_error')).toHaveLength(2);
+  });
+
+  it('one retry when it can help within the deadline: a short rate limit, a provider hiccup — never a long wait', async () => {
+    const limited = (wait: string) => Object.assign(new Error('x'), { status: 429, code: 'rate_limit_exceeded', headers: new Headers({ 'retry-after': wait }) });
+    const short = groq((_b, n) => (n === 0 ? Promise.reject(limited('1')) : say('After a short wait.')));
+    expect((await short.ai.respond(await chat())).message).toBe('After a short wait.');
+    const long = groq(() => Promise.reject(limited('40')));
+    const t0 = Date.now();
+    await rejects(long.ai.respond(await chat()), 'ai_busy', 'upstream_rate_limit');
+    expect([long.bodies.length, Date.now() - t0 < 2000]).toEqual([1, true]); // no 40 s wait inside the request
+    const hiccup = groq((_b, n) => (n === 0 ? Promise.reject(Object.assign(new Error('x'), { status: 503 })) : say('Back.')));
+    expect((await hiccup.ai.respond(await chat())).message).toBe('Back.');
+    const down = groq(fail({ status: 503 }));
+    await rejects(down.ai.respond(await chat()), 'ai_unavailable', 'upstream_unavailable');
+    expect(down.bodies).toHaveLength(2); // once more, then a safe error
   });
 
   it('over the endpoint: a throttled provider answers 429 ai_busy with Retry-After, in plain words', async () => {

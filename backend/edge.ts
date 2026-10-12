@@ -48,7 +48,7 @@ async function start(): Promise<{ deps: ChatDeps; cors: string[] }> {
   const config = loadServerConfig({ ...env, APEX_AUTH_SECRET: env.APEX_AUTH_SECRET ?? vault });
   const applied = (await pendingMigrations(db, __APEX_MIGRATIONS__)).length ? await migrate(db, __APEX_MIGRATIONS__) : [];
   const tls = (await db.query<{ v: string | null }>('select version as v from pg_stat_ssl where pid = pg_backend_pid()')).rows[0]?.v ?? 'none';
-  const deps: ChatDeps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 }) as unknown as ChatClient), migrations: __APEX_MIGRATIONS__ };
+  const deps: ChatDeps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 0 }) as unknown as ChatClient), migrations: __APEX_MIGRATIONS__ };
   console.info(JSON.stringify({ event: 'ai.server', env: config.env, runtime: 'supabase-edge', ai: !!deps.ai, provider: config.ai?.provider ?? null, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
   return { deps, cors: config.corsOrigins };
 }

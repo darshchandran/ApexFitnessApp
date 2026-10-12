@@ -171,7 +171,12 @@ export class AIService {
     }
   }
 
-  /** One model request. Groq's "tool_use_failed" (the model wrote an unparseable tool call) is sampled once more. */
+  /**
+   * One model request, retried once (the SDK client doesn't retry: maxRetries 0) when that can still
+   * help within the deadline: Groq's "tool_use_failed" (an unparseable tool call), a provider hiccup
+   * (5xx, network), or a rate limit that clears within 5 s. A longer rate limit answers ai_busy at
+   * once, with Retry-After, instead of waiting out the deadline.
+   */
   private async call(model: string, messages: ChatCompletionMessageParam[], abort: AbortController, remaining: () => number, userId: string, log: AILogger): Promise<ChatCompletion> {
     const { provider, limits } = this.deps.config;
     for (let attempt = 0; ; attempt++) {
@@ -195,8 +200,11 @@ export class AIService {
       } catch (e) {
         const err = abort.signal.aborted ? new AIError('timeout') : classify(e);
         log({ event: 'ai.model_error', category: err.category, model, ...(!abort.signal.aborted && { upstream: upstreamFacts(e) }) });
-        if (err.category === 'upstream_tool_call_failed' && attempt === 0) continue;
-        throw err;
+        const wait = err.code === 'ai_busy' ? (err.retryAfter ?? 60) * 1000 : 0;
+        const transient = ['upstream_tool_call_failed', 'upstream_unavailable', 'upstream_network'].includes(err.category) || (err.code === 'ai_busy' && wait <= 5000);
+        if (attempt > 0 || !transient || remaining() < wait + 10_000) throw err;
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+        continue;
       }
       if (!res || !Array.isArray(res.choices) || !res.choices[0]?.message) throw this.malformed(model, log);
       return res;

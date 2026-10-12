@@ -29,7 +29,7 @@ async function main() {
   const applied = await migrate(db);
 
   // the OpenAI SDK as an HTTP client for the configured provider (Groq's OpenAI-compatible endpoint, or OpenAI)
-  const deps = createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 }) as unknown as ChatClient);
+  const deps = createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 0 }) as unknown as ChatClient);
   const port = Number(process.env.PORT) || 8787;
   const host = process.env.HOST || '127.0.0.1';
   createAIServer(deps, { corsOrigins: config.corsOrigins, trustProxy: config.trustProxy }).listen(port, host, () =>

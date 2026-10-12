@@ -4084,7 +4084,12 @@ var AIService = class {
       clearTimeout(timer);
     }
   }
-  /** One model request. Groq's "tool_use_failed" (the model wrote an unparseable tool call) is sampled once more. */
+  /**
+   * One model request, retried once (the SDK client doesn't retry: maxRetries 0) when that can still
+   * help within the deadline: Groq's "tool_use_failed" (an unparseable tool call), a provider hiccup
+   * (5xx, network), or a rate limit that clears within 5 s. A longer rate limit answers ai_busy at
+   * once, with Retry-After, instead of waiting out the deadline.
+   */
   async call(model, messages, abort, remaining, userId, log) {
     const { provider, limits } = this.deps.config;
     for (let attempt = 0; ; attempt++) {
@@ -4108,8 +4113,11 @@ var AIService = class {
       } catch (e) {
         const err = abort.signal.aborted ? new AIError("timeout") : classify(e);
         log({ event: "ai.model_error", category: err.category, model, ...!abort.signal.aborted && { upstream: upstreamFacts(e) } });
-        if (err.category === "upstream_tool_call_failed" && attempt === 0) continue;
-        throw err;
+        const wait = err.code === "ai_busy" ? (err.retryAfter ?? 60) * 1e3 : 0;
+        const transient = ["upstream_tool_call_failed", "upstream_unavailable", "upstream_network"].includes(err.category) || err.code === "ai_busy" && wait <= 5e3;
+        if (attempt > 0 || !transient || remaining() < wait + 1e4) throw err;
+        if (wait) await new Promise((r) => setTimeout(r, wait));
+        continue;
       }
       if (!res || !Array.isArray(res.choices) || !res.choices[0]?.message) throw this.malformed(model, log);
       return res;
@@ -4404,7 +4412,7 @@ async function start() {
   const config = loadServerConfig({ ...env, APEX_AUTH_SECRET: env.APEX_AUTH_SECRET ?? vault });
   const applied = (await pendingMigrations(db, define_APEX_MIGRATIONS_default)).length ? await migrate(db, define_APEX_MIGRATIONS_default) : [];
   const tls = (await db.query("select version as v from pg_stat_ssl where pid = pg_backend_pid()")).rows[0]?.v ?? "none";
-  const deps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 })), migrations: define_APEX_MIGRATIONS_default };
+  const deps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 0 })), migrations: define_APEX_MIGRATIONS_default };
   console.info(JSON.stringify({ event: "ai.server", env: config.env, runtime: "supabase-edge", ai: !!deps.ai, provider: config.ai?.provider ?? null, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
   return { deps, cors: config.corsOrigins };
 }
