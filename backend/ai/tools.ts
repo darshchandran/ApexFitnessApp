@@ -519,8 +519,12 @@ export const TOOLS: ApexTool[] = [...READ_TOOLS, ...PROPOSE_TOOLS];
 const BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
 
 /** Function tools for the Responses API (strict schemas). */
+/**
+ * Chat Completions tool definitions. No `strict` flag (Groq doesn't document it for tools): the
+ * schemas are strict-shaped anyway, and runTool validates every argument against them.
+ */
 export const toolDefinitions = () =>
-  TOOLS.map((t) => ({ type: 'function' as const, name: t.name, description: t.description, parameters: t.input as unknown as Record<string, unknown>, strict: true }));
+  TOOLS.map((t) => ({ type: 'function' as const, function: { name: t.name, description: t.description, parameters: t.input as unknown as Record<string, unknown> } }));
 
 export type ToolError = 'unknown_tool' | 'invalid_arguments' | 'athlete_data_unavailable' | 'tool_failed';
 export type ToolResult = { ok: true; output: unknown } | { ok: false; error: ToolError; detail?: string };

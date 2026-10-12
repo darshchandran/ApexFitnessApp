@@ -1,14 +1,14 @@
 // APEX AI on Supabase Edge Functions (Deno): the same routes, checks and database code as
 // server.ts. `npm run ai:build:edge` bundles it into one file deployed as the `apex-ai` function.
 //
-// Configuration: Supabase provides SUPABASE_DB_URL. OPENAI_API_KEY (and optionally APEX_AI_MODEL)
-// are Edge Function secrets. The token-signing secret is `apex_auth_secret` in Supabase Vault,
+// Configuration: Supabase provides SUPABASE_DB_URL. GROQ_API_KEY (and optionally APEX_AI_MODEL,
+// or APEX_AI_PROVIDER=openai with OPENAI_API_KEY) are Edge Function secrets. The token-signing secret is `apex_auth_secret` in Supabase Vault,
 // generated inside the database (see DEPLOY.md) so no person or tool ever handles it.
 import OpenAI from 'openai';
 import { ConfigError, loadServerConfig } from './ai/config';
 import { createDeps, type ChatDeps } from './ai/handler';
 import { ERRORS } from './ai/schemas';
-import type { ResponsesClient } from './ai/service';
+import type { ChatClient } from './ai/service';
 import { migrate, pendingMigrations, pgDb, type Migration } from './db/db';
 import { serve, startupFailure } from './http';
 
@@ -19,7 +19,9 @@ declare const __APEX_MIGRATIONS__: Migration[];
 /** Production, always; the settings that aren't secrets have defaults the function's secrets may override. */
 export function edgeEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
   return {
-    APEX_AI_MODEL: 'gpt-5-mini',
+    // Groq, free tier: a production model with tool use
+    APEX_AI_PROVIDER: 'groq',
+    APEX_AI_MODEL: 'openai/gpt-oss-120b',
     APEX_AI_CORS_ORIGINS: 'none',
     APEX_AI_REGISTRATION: 'open',
     ...env,
@@ -46,8 +48,8 @@ async function start(): Promise<{ deps: ChatDeps; cors: string[] }> {
   const config = loadServerConfig({ ...env, APEX_AUTH_SECRET: env.APEX_AUTH_SECRET ?? vault });
   const applied = (await pendingMigrations(db, __APEX_MIGRATIONS__)).length ? await migrate(db, __APEX_MIGRATIONS__) : [];
   const tls = (await db.query<{ v: string | null }>('select version as v from pg_stat_ssl where pid = pg_backend_pid()')).rows[0]?.v ?? 'none';
-  const deps: ChatDeps = { ...createDeps(config, db, (apiKey) => new OpenAI({ apiKey, maxRetries: 1 }) as unknown as ResponsesClient), migrations: __APEX_MIGRATIONS__ };
-  console.info(JSON.stringify({ event: 'ai.server', env: config.env, runtime: 'supabase-edge', ai: !!deps.ai, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
+  const deps: ChatDeps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 }) as unknown as ChatClient), migrations: __APEX_MIGRATIONS__ };
+  console.info(JSON.stringify({ event: 'ai.server', env: config.env, runtime: 'supabase-edge', ai: !!deps.ai, provider: config.ai?.provider ?? null, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
   return { deps, cors: config.corsOrigins };
 }
 

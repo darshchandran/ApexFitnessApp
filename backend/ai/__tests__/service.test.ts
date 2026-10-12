@@ -2,8 +2,10 @@ import { describe, expect, it } from '@jest/globals';
 import { handleChat } from '../handler';
 import { PROMPT_VERSION } from '../prompts';
 import { AIError } from '../schemas';
-import { ConversationStore, type ChatInput } from '../service';
-import { callTool, post, res, say, TODAY, testDeps, testService, toolOutputs, trainedAthlete, type Body } from '../test-utils';
+import { loadAIConfig } from '../config';
+import type { AILogEvent } from '../security';
+import { AIService, ConversationStore, type ChatInput } from '../service';
+import { callTool, fakeClient, post, res, say, TODAY, testActions, testDeps, testService, toolOutputs, trainedAthlete, type Body } from '../test-utils';
 
 const chat = async (over: Partial<ChatInput> = {}): Promise<ChatInput> => ({
   userId: 'athlete_1', conversationId: 'c1', message: 'Why did you reduce today’s legs?', mode: 'default', data: await trainedAthlete(), today: TODAY, ...over,
@@ -15,17 +17,18 @@ const rejects = async (p: Promise<unknown>, code: string, category?: string) => 
   if (category) expect((e as AIError).category).toBe(category);
 };
 
-describe('the Responses API loop', () => {
-  it('a plain answer: one request with APEX instructions, strict tools, no storage at OpenAI', async () => {
+describe('the Chat Completions tool loop', () => {
+  it('a plain answer: one request with APEX instructions as the system message and the 14 tools', async () => {
     const { ai, bodies } = testService(() => say('Hi! Ask me about your training.'));
     const out = await ai.respond(await chat({ message: 'hello' }));
     expect(out).toEqual({ conversation_id: 'c1', message: 'Hi! Ask me about your training.', model: 'test-model', prompt_version: PROMPT_VERSION, tools_used: [], action_required: false, action: null, rounds: 0 });
     const b = bodies[0];
-    expect(b).toMatchObject({ model: 'test-model', store: false, tool_choice: 'auto', parallel_tool_calls: true, max_output_tokens: 2000 });
-    expect(b.instructions).toContain('source of truth');
+    expect(b).toMatchObject({ model: 'test-model', tool_choice: 'auto', max_completion_tokens: 2000 });
+    expect(b.messages[0]).toEqual({ role: 'system', content: expect.stringContaining('source of truth') });
     expect(b.tools).toHaveLength(14);
-    expect(b.input).toEqual([{ role: 'user', content: 'hello' }]);
-    expect(b.safety_identifier).toMatch(/^[0-9a-f]{32}$/);
+    expect(b.messages.slice(1)).toEqual([{ role: 'user', content: 'hello' }]);
+    // the test config is OpenAI: nothing stored there, an opaque per-athlete id (Groq takes neither — see below)
+    expect(b).toMatchObject({ store: false, safety_identifier: expect.stringMatching(/^[0-9a-f]{32}$/) });
     expect(JSON.stringify(b)).not.toContain('athlete_1'); // neither the user id nor athlete data goes to the model unasked
     expect(JSON.stringify(b)).not.toContain('Smith Machine Squat');
   });
@@ -35,7 +38,9 @@ describe('the Responses API loop', () => {
     const out = await ai.respond(await chat());
     expect(out).toMatchObject({ message: 'Legs was cut because of this morning’s basketball.', tools_used: ['get_current_adaptation'], rounds: 1 });
     const second = bodies[1];
-    expect(second.input.map((i) => i.type ?? i.role)).toEqual(['user', 'function_call', 'function_call_output']);
+    expect(second.messages.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'tool']);
+    expect(second.messages[2]).toEqual({ role: 'assistant', content: null, tool_calls: [callTool('get_current_adaptation')] });
+    expect(second.messages[3]).toMatchObject({ role: 'tool', tool_call_id: 'call_get_current_adaptation_1' });
     const [adaptation] = toolOutputs(second);
     expect(adaptation.sessions[0]).toMatchObject({ template: 'Legs', outcome: expect.not.stringMatching(/^normal$/) });
     expect(adaptation.sessions[0].reasons.join(' ')).toMatch(/basketball/i);
@@ -57,7 +62,7 @@ describe('the Responses API loop', () => {
 
   it('a failing tool call is returned to the model as an error, and the model can recover', async () => {
     const { ai, bodies, logs } = testService((_b, n) =>
-      n === 0 ? res(callTool('get_recent_sessions', { days: 400 }), callTool('delete_history', {}), { ...callTool('get_prs', {}, 3), arguments: '{oops' })
+      n === 0 ? res(callTool('get_recent_sessions', { days: 400 }), callTool('delete_history', {}), { ...callTool('get_prs', {}, 3), function: { name: 'get_prs', arguments: '{oops' } })
         : n === 1 ? res(callTool('get_recent_sessions', { days: 28 }))
           : say('Over the last 4 weeks you logged 2 sessions.'));
     const out = await ai.respond(await chat({ message: 'what did I do this month?' }));
@@ -89,7 +94,7 @@ describe('failures stay contained', () => {
   it('model and API failures become safe error codes', async () => {
     const fail = (e: object) => () => Promise.reject(Object.assign(new Error('upstream detail'), e));
     await rejects(testService(fail({ status: 401 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_auth');
-    await rejects(testService(fail({ status: 429 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_rate_limit');
+    await rejects(testService(fail({ status: 429 })).ai.respond(await chat()), 'ai_busy', 'upstream_rate_limit');
     await rejects(testService(fail({ status: 429, code: 'insufficient_quota' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_quota');
     await rejects(testService(fail({ status: 429, code: 'credit_balance_exhausted' })).ai.respond(await chat()), 'ai_unavailable', 'upstream_quota'); // seen live
     await rejects(testService(fail({ status: 503 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_unavailable');
@@ -99,9 +104,9 @@ describe('failures stay contained', () => {
     const { ai, logs } = testService(fail({ status: 500 }));
     await rejects(ai.respond(await chat()), 'ai_unavailable');
     expect(logs).toEqual([{ event: 'ai.model_error', category: 'upstream_unavailable', model: 'test-model', upstream: { status: 500 } }]);
-    // a 429 is logged with OpenAI's error identifier and the account's published limits — never its message
+    // a 429 is logged with the provider's error identifier and the account's published limits — never its message
     const limited = testService(fail({ status: 429, code: 'rate_limit_exceeded', message: 'Rate limit reached in organization org-secret', headers: new Headers({ 'x-ratelimit-limit-tokens': '30000', 'x-ratelimit-limit-requests': '500' }) }));
-    await rejects(limited.ai.respond(await chat()), 'ai_unavailable', 'upstream_rate_limit');
+    await rejects(limited.ai.respond(await chat()), 'ai_busy', 'upstream_rate_limit');
     expect(limited.logs).toEqual([{ event: 'ai.model_error', category: 'upstream_rate_limit', model: 'test-model', upstream: { status: 429, code: 'rate_limit_exceeded', limitRequests: '500', limitTokens: '30000' } }]);
     expect(JSON.stringify(limited.logs)).not.toMatch(/org-secret|upstream detail/);
   });
@@ -118,11 +123,12 @@ describe('failures stay contained', () => {
 
   it('malformed model output is refused, not guessed at', async () => {
     const cases = [
-      () => ({ id: 'r', status: 'completed', output: null }) as never,
+      () => ({ id: 'r', choices: null }) as never,
+      () => ({ id: 'r', choices: [] }) as never,
       () => res(),
-      () => ({ ...say(''), status: 'incomplete' }) as never,
-      () => ({ ...say('half'), status: 'failed' }) as never,
-      () => res({ type: 'function_call', call_id: 7, name: 'get_readiness', arguments: {} }),
+      () => say('', 'length'),
+      () => say('   '),
+      () => res({ id: 7, type: 'function', function: { name: 'get_readiness', arguments: {} } }),
       () => res(callTool('get_readiness'), { type: 'mystery_item' }),
     ];
     for (const script of cases) await rejects(testService(script).ai.respond(await chat()), 'model_error');
@@ -152,7 +158,7 @@ describe('conversation memory and actions', () => {
     const { ai, bodies } = testService((_b, n) => (n === 0 ? res(callTool('get_training_load')) : say(`answer ${n}`)));
     await ai.respond(await chat({ message: 'how loaded am I?' }));
     await ai.respond(await chat({ message: 'and tomorrow?' }));
-    expect(bodies[2].input).toEqual([
+    expect(bodies[2].messages.slice(1)).toEqual([
       { role: 'user', content: 'how loaded am I?' },
       { role: 'assistant', content: 'answer 1' },
       { role: 'user', content: 'and tomorrow?' },
@@ -187,3 +193,55 @@ describe('conversation memory and actions', () => {
     expect(data.basketball).toHaveLength(1);
   });
 });
+
+describe('Groq (the production provider)', () => {
+  const GROQ = { GROQ_API_KEY: 'gsk_testKeyDoNotLog0123456789', APEX_AI_MODEL: 'openai/gpt-oss-120b' };
+  const groq = (script: Parameters<typeof fakeClient>[0]) => {
+    const logs: AILogEvent[] = [];
+    const { client, bodies } = fakeClient(script);
+    const ai = new AIService({ client, config: loadAIConfig(GROQ), logger: (e) => logs.push(e), actions: testActions() });
+    return { ai, bodies, logs };
+  };
+  const fail = (e: object) => () => Promise.reject(Object.assign(new Error('Rate limit reached for model in organization org_SECRET: Limit 8000, Requested 9000'), e));
+
+  it("talks to Groq's OpenAI-compatible endpoint — never to OpenAI — with nothing OpenAI-only in the request", async () => {
+    expect(loadAIConfig(GROQ)).toMatchObject({ provider: 'groq', baseURL: 'https://api.groq.com/openai/v1', apiKey: GROQ.GROQ_API_KEY });
+    // an OpenAI key still configured changes nothing: Groq is chosen, there is no fallback
+    expect(loadAIConfig({ ...GROQ, OPENAI_API_KEY: 'sk-proj-abcdefghijklmnopqrstuvwxyz012345' })).toMatchObject({ provider: 'groq', baseURL: 'https://api.groq.com/openai/v1' });
+    const { ai, bodies } = groq(() => say('Hi.'));
+    await ai.respond(await chat());
+    expect(bodies[0]).toMatchObject({ model: 'openai/gpt-oss-120b', tool_choice: 'auto', max_completion_tokens: 2000, reasoning_effort: 'low' });
+    expect(bodies[0]).not.toHaveProperty('store');
+    expect(bodies[0]).not.toHaveProperty('safety_identifier');
+    expect(bodies[0].tools?.[0]).toMatchObject({ type: 'function', function: { name: expect.any(String) } });
+  });
+
+  it('free-tier rate limits: "busy, try again" with the wait Groq gives — nothing from its message is logged or returned', async () => {
+    const limited = groq(fail({ status: 429, code: 'rate_limit_exceeded', headers: new Headers({ 'retry-after': '23', 'x-ratelimit-limit-tokens': '8000', 'x-ratelimit-limit-requests': '1000' }) }));
+    const e = (await limited.ai.respond(await chat()).catch((x: unknown) => x)) as AIError;
+    expect([e.code, e.category, e.retryAfter]).toEqual(['ai_busy', 'upstream_rate_limit', 23]);
+    expect(limited.logs).toEqual([{ event: 'ai.model_error', category: 'upstream_rate_limit', model: 'openai/gpt-oss-120b', upstream: { status: 429, code: 'rate_limit_exceeded', limitRequests: '1000', limitTokens: '8000' } }]);
+    expect(JSON.stringify(limited.logs)).not.toMatch(/org_SECRET|Rate limit reached|gsk_/);
+    await rejects(groq(fail({ status: 413 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_request_too_large');
+    await rejects(groq(fail({ status: 498 })).ai.respond(await chat()), 'ai_unavailable', 'upstream_unavailable');
+  });
+
+  it('a tool call Groq could not parse (tool_use_failed) is sampled once more, then refused', async () => {
+    const once = groq((_b, n) => (n === 0 ? Promise.reject(Object.assign(new Error('Failed to call a function'), { status: 400, code: 'tool_use_failed' })) : say('Recovered.')));
+    expect((await once.ai.respond(await chat())).message).toBe('Recovered.');
+    expect(once.bodies).toHaveLength(2);
+    const always = groq(fail({ status: 400, code: 'tool_use_failed' }));
+    await rejects(always.ai.respond(await chat()), 'model_error', 'upstream_tool_call_failed');
+    expect(always.logs.filter((l) => l.event === 'ai.model_error')).toHaveLength(2);
+  });
+
+  it('over the endpoint: a throttled provider answers 429 ai_busy with Retry-After, in plain words', async () => {
+    const { deps } = testDeps(fail({ status: 429, code: 'rate_limit_exceeded', headers: new Headers({ 'retry-after': '7' }) }));
+    const r = await handleChat(post({ message: 'hi' }), deps);
+    expect([r.status, r.headers.get('retry-after')]).toEqual([429, '7']);
+    const body = await r.json();
+    expect(body.error).toEqual({ code: 'ai_busy', message: expect.stringMatching(/busy right now.*not affected/) });
+    expect(JSON.stringify(body)).not.toMatch(/org_SECRET|Rate limit reached/);
+  });
+});
+

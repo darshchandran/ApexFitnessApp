@@ -17,7 +17,7 @@ import { callTool, device, NOW, res, say, SECRET, snapshot, testActions, testClo
 
 type Device = Awaited<ReturnType<typeof device>>;
 const ROOT = join(__dirname, '..', '..', '..');
-const lastRole = (b: Body) => (b.input as Record<string, unknown>[]).at(-1)?.role;
+const lastRole = (b: Body) => b.messages.at(-1)?.role;
 const BASKETBALL = { duration_min: 90, rpe: 8, session_type: null, lower_body_fatigue: null, date: null };
 const proposer = (b: Body) => (lastRole(b) === 'user' ? res(callTool('propose_log_basketball', BASKETBALL)) : say('Confirm in the app.'));
 
@@ -63,6 +63,9 @@ describe('production configuration guards', () => {
       [{ OPENAI_API_KEY: undefined }, /OPENAI_API_KEY is not set/],
       [{ OPENAI_API_KEY: 'sk-mock' }, /does not look like an OpenAI API key/],
       [{ OPENAI_BASE_URL: 'http://127.0.0.1:8799/v1' }, /OPENAI_BASE_URL must not be set in production/],
+      [{ GROQ_API_KEY: 'gsk_short' }, /GROQ_API_KEY does not look like a Groq API key/],
+      [{ APEX_AI_PROVIDER: 'groq' }, /GROQ_API_KEY is not set/],
+      [{ APEX_AI_PROVIDER: 'anthropic' }, /APEX_AI_PROVIDER must be "groq" or "openai"/],
       [{ APEX_AI_MODEL: undefined }, /APEX_AI_MODEL is not set/],
       [{ DATABASE_URL: undefined }, /DATABASE_URL is required in production/],
       [{ DATABASE_URL: 'mysql://x' }, /DATABASE_URL must be a postgres/],
@@ -157,6 +160,13 @@ describe('Supabase Edge Function adapter', () => {
     expect(edgeEnv({ SUPABASE_DB_URL: 'postgres://h/db?sslmode=require' }).DATABASE_URL).toBe('postgres://h/db');
     expect(edgeEnv({ SUPABASE_DB_URL: 'postgres://h/db?a=1&sslmode=require' }).DATABASE_URL).toBe('postgres://h/db?a=1');
     expect(edgeEnv({ APEX_AI_MODEL: 'm-1' }).APEX_AI_MODEL).toBe('m-1');
+  });
+
+  it('uses Groq (openai/gpt-oss-120b) even with an OpenAI key still in the secrets — no OpenAI calls, no fallback', () => {
+    const env = edgeEnv({ SUPABASE_DB_URL: 'postgres://h/db', GROQ_API_KEY: 'gsk_abcdefghijklmnopqrstuvwxyz0123456789', OPENAI_API_KEY: PROD.OPENAI_API_KEY, APEX_AUTH_SECRET: PROD.APEX_AUTH_SECRET });
+    expect(env).toMatchObject({ APEX_AI_PROVIDER: 'groq', APEX_AI_MODEL: 'openai/gpt-oss-120b' });
+    expect(loadServerConfig(env).ai).toMatchObject({ provider: 'groq', baseURL: 'https://api.groq.com/openai/v1', apiKey: env.GROQ_API_KEY, models: { default: 'openai/gpt-oss-120b' } });
+    expect(problems({ ...env, GROQ_API_KEY: undefined })).toEqual(['GROQ_API_KEY is not set']); // never silently OpenAI
   });
 
   it('routes /apex-ai/<route> to the API and takes the address the proxy observed', () => {

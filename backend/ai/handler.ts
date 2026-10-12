@@ -12,11 +12,11 @@ import { daysBetween } from '../../src/domain/util';
 import { pendingMigrations, type Db, type Migration } from '../db/db';
 import { ACTIONS, ActionRejected, resultMessage, simulate, type ActionResult } from './actions';
 import { refreshSession, registerDevice, revokeSession } from './auth';
-import { DEFAULT_LIMITS, type AILimits, type Environment, type ServerConfig } from './config';
+import { DEFAULT_LIMITS, type AIConfig, type AILimits, type Environment, type ServerConfig } from './config';
 import { snapshotSource, type AthleteDataSource } from './data';
 import { AIError, check, confirmSchema, ERRORS, refreshSchema, requestSchema, S, type AIErrorCode, type AIMessageRequest, type Schema } from './schemas';
 import { authenticate, consoleLogger, type AILogEvent, type AILogger, type AuthUser } from './security';
-import { AIService, ConversationStore, type ResponsesClient } from './service';
+import { AIService, ConversationStore, type ChatClient } from './service';
 import { ActionStore, argumentsHash, clientAction, RateLimits, type StoredAction } from './store';
 
 export interface ChatDeps {
@@ -37,10 +37,10 @@ export interface ChatDeps {
   migrations?: Migration[];
 }
 
-export function createDeps(config: ServerConfig, db: Db, makeClient: (apiKey: string) => ResponsesClient, logger: AILogger = consoleLogger): ChatDeps {
+export function createDeps(config: ServerConfig, db: Db, makeClient: (ai: AIConfig) => ChatClient, logger: AILogger = consoleLogger): ChatDeps {
   const actions = new ActionStore(db);
-  const ai = config.ai && new AIService({ client: makeClient(config.ai.apiKey), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
-  if (!ai) logger({ event: 'ai.config', problem: 'OPENAI_API_KEY / APEX_AI_MODEL not set: chat is unavailable (development)' });
+  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
+  if (!ai) logger({ event: 'ai.config', problem: 'no AI provider key / APEX_AI_MODEL set: chat is unavailable (development)' });
   return {
     env: config.env, secret: config.authSecret, ai, db, actions, rate: new RateLimits(db), registration: config.registration,
     data: snapshotSource, logger, limits: config.ai?.limits ?? DEFAULT_LIMITS,
@@ -220,7 +220,7 @@ export async function handleChat(req: Request, deps: ChatDeps, ctx: Ctx = { rid:
     if (out.action) ctx.log({ event: 'ai.action', op: 'propose', type: out.action.type, ok: true });
     return reply(200, out);
   } catch (e) {
-    if (e instanceof AIError) return fail(e.code);
+    if (e instanceof AIError) return fail(e.code, {}, e.retryAfter ? { 'retry-after': String(e.retryAfter) } : {});
     const down = unavailable(e);
     ctx.log({ event: 'ai.error', where: 'chat', category: down ? 'database_unavailable' : 'internal' });
     return fail(down ? 'ai_unavailable' : 'internal');

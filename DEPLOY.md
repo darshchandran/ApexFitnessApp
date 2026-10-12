@@ -5,9 +5,9 @@ APEX app (iOS / Android / web)
    │  HTTPS  (EXPO_PUBLIC_APEX_AI_URL — an address, never a secret)
    ▼
 APEX AI backend  (this repo: backend/, a Node container)
-   │  TLS (DATABASE_URL, verified certificate)        │  HTTPS (OPENAI_API_KEY)
+   │  TLS (DATABASE_URL, verified certificate)        │  HTTPS (GROQ_API_KEY)
    ▼                                                  ▼
-Supabase / Postgres                              OpenAI Responses API
+Supabase / Postgres                              Groq Chat Completions (OpenAI-compatible)
 ```
 
 The athlete's training data stays on the device; the backend stores only install identities,
@@ -31,8 +31,9 @@ as the Node server (`http.ts` `serve()` is shared); only the runtime differs (De
 | `APEX_ENV=production`, `DATABASE_SSL=require` | fixed in `edge.ts` (cannot be overridden) |
 | `DATABASE_URL` | Supabase's built-in `SUPABASE_DB_URL` (TLS required, certificate verified; any `sslmode` stripped) |
 | `APEX_AUTH_SECRET` | Supabase **Vault** secret `apex_auth_secret`, generated inside the database (below) — nobody ever sees it |
-| `OPENAI_API_KEY` | **Edge Function secret** (Dashboard → Edge Functions → Secrets) — set by the owner |
-| `APEX_AI_MODEL` | Edge Function secret, optional (default `gpt-5-mini`) |
+| `GROQ_API_KEY` | **Edge Function secret** (Dashboard → Edge Functions → Secrets) — set by the owner |
+| `APEX_AI_PROVIDER` | default `groq`; `openai` (with `OPENAI_API_KEY`) only if set explicitly — never a fallback |
+| `APEX_AI_MODEL` | Edge Function secret, optional (default `openai/gpt-oss-120b`, a Groq production model with tool use) |
 | `APEX_AI_CORS_ORIGINS` / `APEX_AI_REGISTRATION` | defaults `none` / `open`; override with Edge Function secrets |
 
 The function is deployed with `verify_jwt = false` because it authenticates every AI request
@@ -68,8 +69,9 @@ The sections below describe the same backend as a Node container for any other h
 | Variable | Production value | Notes |
 | --- | --- | --- |
 | `APEX_ENV` | `production` | Required, no default. Production refuses to start unless every row below is valid. |
-| `OPENAI_API_KEY` | your OpenAI key (`sk-…`) | Server only. |
-| `APEX_AI_MODEL` | e.g. a current GPT model id | Also optional `APEX_FAST_MODEL`, `APEX_DEEP_MODEL` (fall back to `APEX_AI_MODEL`). |
+| `GROQ_API_KEY` | your Groq key (`gsk_…`) | Server only. Groq is used when this is set (or `APEX_AI_PROVIDER=groq`). |
+| `APEX_AI_PROVIDER` | `groq` (or `openai` + `OPENAI_API_KEY`) | Optional; one provider per deployment, no fallback. |
+| `APEX_AI_MODEL` | e.g. `openai/gpt-oss-120b` (Groq) | Also optional `APEX_FAST_MODEL`, `APEX_DEEP_MODEL` (fall back to `APEX_AI_MODEL`). |
 | `APEX_AUTH_SECRET` | ≥ 32 random characters | Signs 15-minute access tokens. Generate: `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"`. |
 | `DATABASE_URL` | `postgres://…` (no `sslmode=`) | Supabase: the **Supavisor session pooler** (`…pooler.supabase.com:5432`, user `postgres.<project-ref>`) suits a long-running server; the transaction pooler (`:6543`) also works with this backend. |
 | `DATABASE_SSL` | `require` | Certificate is verified. |
@@ -119,7 +121,7 @@ EXPO_PUBLIC_APEX_AI_URL=https://<your-backend> npm run export:production   # web
 ```
 
 - The script refuses non-https or local addresses and fails if the bundle contains a secret,
-  an OpenAI endpoint, database or token-signing code, the dev token tool, or a local AI address —
+  a model-provider key or endpoint (OpenAI, Groq), database or token-signing code, the dev token tool, or a local AI address —
   or if the production address is missing from it.
 - Production builds ignore any address that isn't `https://` on a public host (APEX AI is then
   simply off in that build). Development builds without the variable can enter a server.
@@ -145,7 +147,7 @@ For Supabase the backend URL is `https://gbknsjfbtdfvazhhrtsn.supabase.co/functi
 restart is a redeploy of the function (§0).
 
 ```bash
-npm run ai:smoke -- --url https://<your-backend>                       # health, real OpenAI answers, actions, isolation, failures, rate limits
+npm run ai:smoke -- --url https://<your-backend>                       # health, real model answers, actions, isolation, failures, rate limits
 npm run ai:smoke -- --url https://<your-backend> --phase restart-before
 #   … restart / redeploy the backend …
 npm run ai:smoke -- --url https://<your-backend> --phase restart-after
@@ -166,3 +168,23 @@ passwords, message text, profile data or action arguments.
 - Conversation context (a few recent turns) is kept in each server's memory by design — with
   several instances a conversation can lose earlier context, never data.
 - Rate limits use fixed windows (a burst at a window boundary can briefly reach twice the limit).
+
+## 8. Model provider: Groq
+
+APEX AI talks to Groq's OpenAI-compatible **Chat Completions** endpoint
+(`https://api.groq.com/openai/v1`) through the OpenAI SDK, with model `openai/gpt-oss-120b`
+(a Groq production model with tool use). Chat Completions — not the Responses API, which Groq
+offers only in beta without `store`, `include` or `safety_identifier` — is Groq's documented path
+for multi-step tool calling.
+
+- Requests carry the system prompt, the conversation, the 14 tool definitions and tool results.
+  Tool arguments are validated on the server (the `strict` flag isn't documented by Groq for tools).
+  `reasoning_effort: "low"` keeps gpt-oss's token use down.
+- Free-tier limits (Groq's published table at the time of writing: 30 requests/min, 1K/day, 8K
+  tokens/min, 200K/day for gpt-oss-120b) are tight: one question with a tool round uses roughly
+  5–6K tokens. A Groq 429 becomes `429 ai_busy` with `Retry-After` ("busy, try again in a minute");
+  a request over the token limit (413) becomes `503 ai_unavailable`. Logs record Groq's error code
+  and published limits, never its message.
+- A tool call Groq couldn't parse (`tool_use_failed`) is sampled once more, then refused safely.
+- `OPENAI_API_KEY` may stay in the secrets; it is unused unless `APEX_AI_PROVIDER=openai`.
+

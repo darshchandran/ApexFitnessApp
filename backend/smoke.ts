@@ -1,4 +1,4 @@
-// LIVE smoke test for a DEPLOYED APEX AI backend: real HTTPS, real database, real OpenAI.
+// LIVE smoke test for a DEPLOYED APEX AI backend: real HTTPS, real database, the real model provider (Groq).
 // Nothing is mocked — a failure is reported as FAIL with its category, never hidden.
 //
 //   npm run ai:smoke -- --url https://ai.example.com            all live checks (~2 min)
@@ -51,16 +51,27 @@ function must(cond: unknown, why: string): asserts cond {
 // ---------- HTTP ----------
 
 interface Reply { status: number; json: any; rid: string | null }
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let busyWaits = 0;
 async function http(method: 'GET' | 'POST', path: string, body?: unknown, token?: string, label?: string): Promise<Reply> {
-  const r = await fetch(`${BASE}${path}`, {
-    method,
-    headers: { ...(body !== undefined && { 'content-type': 'application/json' }), ...(token && { authorization: `Bearer ${token}` }) },
-    ...(body !== undefined && { body: typeof body === 'string' ? body : JSON.stringify(body) }),
-    signal: AbortSignal.timeout(90_000),
-  });
-  const rid = r.headers.get('x-request-id');
-  if (label && rid) requestIds[label] = rid;
-  return { status: r.status, json: await r.json().catch(() => null), rid };
+  for (let attempt = 0; ; attempt++) {
+    const r = await fetch(`${BASE}${path}`, {
+      method,
+      headers: { ...(body !== undefined && { 'content-type': 'application/json' }), ...(token && { authorization: `Bearer ${token}` }) },
+      ...(body !== undefined && { body: typeof body === 'string' ? body : JSON.stringify(body) }),
+      signal: AbortSignal.timeout(90_000),
+    });
+    const rid = r.headers.get('x-request-id');
+    if (label && rid) requestIds[label] = rid;
+    const json = await r.json().catch(() => null);
+    // the model provider's free tier is busy (e.g. Groq's tokens per minute): wait as told, a few times
+    if (r.status === 429 && json?.error?.code === 'ai_busy' && attempt < 4) {
+      busyWaits++;
+      await sleep(Math.min(Number(r.headers.get('retry-after')) || 30, 90) * 1000 + 1000);
+      continue;
+    }
+    return { status: r.status, json, rid };
+  }
 }
 const code = (r: Reply) => r.json?.error?.code ?? r.status;
 
@@ -129,7 +140,7 @@ async function all() {
   const p = await phone();
 
   for (const [label, q] of [['today', 'What is today\'s training plan?'], ['load', 'What is my recent training load?'], ['progression', 'Show my recent progression.']] as const) {
-    await check(`real OpenAI answer: ${label}`, async () => {
+    await check(`real model answer: ${label}`, async () => {
       const r = await chat(A, p, q, `chat-${label}`, `smoke-${label}`);
       must(r.status === 200, `chat answered ${code(r)}`);
       must(typeof r.json.message === 'string' && r.json.message.length > 0, 'empty answer');
@@ -327,7 +338,16 @@ async function clientFlow() {
   let ai = open();
   const last = () => ai.getState().messages.at(-1) as ApexMessage | undefined;
   const ask = async (text: string) => {
-    must(await ai.send(text), `no answer (${JSON.stringify(ai.getState().messages.at(-1))?.slice(0, 160)})`);
+    let answered = await ai.send(text);
+    // the app shows "try again" when the provider's free tier is busy; the athlete would wait and tap retry
+    for (let i = 0; !answered && i < 4; i++) {
+      const m = ai.getState().messages.at(-1);
+      if (m?.role !== 'user' || !m.retry) break;
+      busyWaits++;
+      await sleep(65_000);
+      answered = await ai.retry(m.id);
+    }
+    must(answered, `no answer (${JSON.stringify(ai.getState().messages.at(-1))?.slice(0, 160)})`);
     must(last()?.role === 'apex' && last()!.text.length > 0, 'empty answer');
     return last()!;
   };
@@ -388,6 +408,7 @@ async function main() {
 
   for (const o of outcomes) console.log(`${o.result.padEnd(7)} ${o.name}${o.detail ? ` — ${o.detail}` : ''}`);
   console.log(`request ids (for the server logs): ${JSON.stringify(requestIds)}`);
+  if (busyWaits) console.log(`waited for the model provider ${busyWaits} time(s) (429 ai_busy: free-tier limits)`);
   if (athleteIds.length) {
     const list = athleteIds.map((id) => `'${id}'`).join(', ');
     console.log(`test identities (sessions revoked): ${athleteIds.join(', ')}`);

@@ -53,9 +53,10 @@ describe('tool contracts', () => {
     }
   });
 
-  it('every input and output schema is strict; definitions go to the model with strict: true', () => {
+  it('every input and output schema is strict; definitions go to the model in Chat Completions form', () => {
     for (const t of TOOLS) expect([...strictProblems(t.input), ...strictProblems(t.output)]).toEqual([]);
-    for (const d of toolDefinitions()) expect(d).toMatchObject({ type: 'function', strict: true, parameters: { type: 'object', additionalProperties: false } });
+    // no `strict` flag (Groq doesn't document it for tools): runTool validates every argument instead
+    for (const d of toolDefinitions()) expect(d).toEqual({ type: 'function', function: { name: expect.any(String), description: expect.any(String), parameters: expect.objectContaining({ type: 'object', additionalProperties: false }) } });
   });
 
   it('no tool takes a user, athlete or storage parameter', () => {

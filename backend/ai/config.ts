@@ -1,5 +1,6 @@
-// AI configuration, read from the server environment only. The OpenAI key never reaches the app
-// bundle (no EXPO_PUBLIC_ variable), never leaves this process except to OpenAI, never gets logged.
+// AI configuration, read from the server environment only. The provider key (Groq or OpenAI) never
+// reaches the app bundle (no EXPO_PUBLIC_ variable), never leaves this process except to that
+// provider, never gets logged.
 
 export type ModelMode = 'fast' | 'default' | 'deep';
 
@@ -41,8 +42,21 @@ export const DEFAULT_LIMITS: AILimits = {
   refreshesPerWindow: 120,
 };
 
+/**
+ * The model provider. Both are reached through the OpenAI SDK's Chat Completions client; Groq at its
+ * OpenAI-compatible endpoint. One provider per deployment — there is no fallback between them.
+ */
+export type Provider = 'groq' | 'openai';
+export const PROVIDERS: Record<Provider, { keyVar: string; baseURL?: string; keyFormat: RegExp }> = {
+  groq: { keyVar: 'GROQ_API_KEY', baseURL: 'https://api.groq.com/openai/v1', keyFormat: /^gsk_[A-Za-z0-9]{20,}$/ },
+  openai: { keyVar: 'OPENAI_API_KEY', keyFormat: /^sk-[A-Za-z0-9_-]{20,}$/ },
+};
+
 export interface AIConfig {
+  provider: Provider;
   apiKey: string;
+  /** Groq's endpoint; for OpenAI the SDK default (or OPENAI_BASE_URL — a local mock, development only). */
+  baseURL: string | undefined;
   models: Record<ModelMode, string>;
   limits: AILimits;
 }
@@ -51,13 +65,17 @@ export class AIConfigError extends Error {
   name = 'AIConfigError';
 }
 
-const MODEL_NAME = /^[A-Za-z0-9][\w.:-]{0,99}$/;
+const MODEL_NAME = /^[A-Za-z0-9][\w.:/-]{0,99}$/; // e.g. openai/gpt-oss-120b
 type Env = Record<string, string | undefined>;
 
 /** Throws AIConfigError naming the variable — never its value. */
 export function loadAIConfig(env: Env = process.env, limits: AILimits = DEFAULT_LIMITS): AIConfig {
-  const apiKey = env.OPENAI_API_KEY?.trim();
-  if (!apiKey) throw new AIConfigError('OPENAI_API_KEY is not set');
+  // APEX_AI_PROVIDER, or Groq when a Groq key is configured
+  const provider = env.APEX_AI_PROVIDER?.trim() || (env.GROQ_API_KEY?.trim() ? 'groq' : 'openai');
+  if (provider !== 'groq' && provider !== 'openai') throw new AIConfigError('APEX_AI_PROVIDER must be "groq" or "openai"');
+  const { keyVar, baseURL } = PROVIDERS[provider];
+  const apiKey = env[keyVar]?.trim();
+  if (!apiKey) throw new AIConfigError(`${keyVar} is not set`);
   const model = (name: string, fallback?: string) => {
     const v = env[name]?.trim() || fallback;
     if (!v) throw new AIConfigError(`${name} is not set`);
@@ -65,7 +83,10 @@ export function loadAIConfig(env: Env = process.env, limits: AILimits = DEFAULT_
     return v;
   };
   const base = model('APEX_AI_MODEL');
-  return { apiKey, models: { default: base, fast: model('APEX_FAST_MODEL', base), deep: model('APEX_DEEP_MODEL', base) }, limits };
+  return {
+    provider, apiKey, baseURL: provider === 'openai' ? env.OPENAI_BASE_URL?.trim() || undefined : baseURL,
+    models: { default: base, fast: model('APEX_FAST_MODEL', base), deep: model('APEX_DEEP_MODEL', base) }, limits,
+  };
 }
 
 /** Bearer-token secret. Missing or short → every request is refused (fail closed). */
@@ -93,7 +114,7 @@ export interface ServerConfig {
   registration: 'open' | 'closed';
   /** Behind a reverse proxy: take the client address from the proxy's X-Forwarded-For. */
   trustProxy: boolean;
-  /** null only in development without an OpenAI key/model: chat answers ai_unavailable. */
+  /** null only in development without a provider key/model: chat answers ai_unavailable. */
   ai: AIConfig | null;
 }
 
@@ -155,11 +176,13 @@ export function loadServerConfig(env: Env = process.env): ServerConfig {
     ai = loadAIConfig(env);
   } catch (e) {
     // development may run without a model (chat answers "unavailable"); production may not
-    if (prod || env.OPENAI_API_KEY || env.APEX_AI_MODEL) problems.push((e as Error).message);
+    if (prod || env.OPENAI_API_KEY || env.GROQ_API_KEY || env.APEX_AI_PROVIDER || env.APEX_AI_MODEL) problems.push((e as Error).message);
   }
   if (prod) {
     if (env.OPENAI_BASE_URL) problems.push('OPENAI_BASE_URL must not be set in production (no mock or proxy model endpoints)');
-    if (ai && !/^sk-[A-Za-z0-9_-]{20,}$/.test(ai.apiKey)) problems.push('OPENAI_API_KEY does not look like an OpenAI API key');
+    if (ai && !PROVIDERS[ai.provider].keyFormat.test(ai.apiKey)) {
+      problems.push(`${PROVIDERS[ai.provider].keyVar} does not look like ${ai.provider === 'groq' ? 'a Groq' : 'an OpenAI'} API key`);
+    }
   }
 
   if (problems.length) throw new ConfigError(problems);

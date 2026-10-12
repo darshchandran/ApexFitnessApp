@@ -30,7 +30,8 @@ async function setup(replies: Reply[] = [], opts: { connected?: boolean; stored?
     return new Response(JSON.stringify(r.body), { status: r.status ?? 200 });
   });
   const store = memoryStore(opts.stored ? { [CONVERSATION_KEY]: JSON.stringify(opts.stored) } : {});
-  const ai = createAssistant({ store, apex: app, fetch, now: () => NOW, timeouts: { chat: 300, action: 300 } });
+  const t0 = Date.now();
+  const ai = createAssistant({ store, apex: app, fetch, now: () => new Date(NOW.getTime() + Date.now() - t0), timeouts: { chat: 300, action: 300 } });
   await ai.init();
   if (opts.connected !== false) await ai.connect('http://apex.test');
   let r!: ReactTestRenderer;
@@ -180,7 +181,7 @@ describe('APEX AI screen', () => {
   });
 
   it('an expired proposal flips to expired by itself and can’t be confirmed', async () => {
-    const soon = { ...proposal, body: { ...proposal.body, action: { ...ACTION, expires_at: new Date(Date.now() + 30).toISOString() } } };
+    const soon = { ...proposal, body: { ...proposal.body, action: { ...ACTION, expires_at: new Date(NOW.getTime() + 30).toISOString() } } };
     const { r, calls } = await setup([soon]);
     await press(pressable(r, `Ask: ${STARTERS[0]}`));
     await act(async () => { await new Promise((res) => setTimeout(res, 150)); });

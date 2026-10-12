@@ -1,5 +1,5 @@
 // Scans an exported client (dist/) for anything that must never ship in the app: server secrets,
-// OpenAI endpoints, database or token-signing code, development tooling, local addresses.
+// model-provider (OpenAI, Groq) keys and endpoints, database or token-signing code, development tooling, local addresses.
 // `node scripts/scan-bundle.mjs [dist] [--expect https://ai.example.com]` — exits 1 on any finding.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
@@ -13,6 +13,9 @@ const FORBIDDEN = [
   ['OpenAI key variable', /OPENAI_API_KEY/],
   ['OpenAI key', /\bsk-(proj-)?[A-Za-z0-9_-]{20,}/],
   ['OpenAI endpoint', /api\.openai\.com|\/v1\/responses\b/],
+  ['Groq key variable', /GROQ_API_KEY/],
+  ['Groq key', /\bgsk_[A-Za-z0-9]{20,}/],
+  ['Groq endpoint', /api\.groq\.com/],
   ['auth secret variable', /APEX_AUTH_SECRET/],
   ['database variable', /DATABASE_URL|DATABASE_CA_CERT/],
   ['database connection string', /postgres(ql)?:\/\/[^\s"'`]+/],

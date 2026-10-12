@@ -61,10 +61,10 @@ a retry banner and the next write rewrites everything.
 
 ## AI backend
 
-A separate server (`backend/`) — the app never contains the OpenAI key or any server secret.
+A separate server (`backend/`) — the app never contains a model-provider key (Groq/OpenAI) or any server secret.
 
 ```bash
-cp .env.example .env    # APEX_ENV=development, APEX_AUTH_SECRET (+ OPENAI_API_KEY, APEX_AI_MODEL to enable chat)
+cp .env.example .env    # APEX_ENV=development, APEX_AUTH_SECRET (+ GROQ_API_KEY, APEX_AI_MODEL to enable chat)
 npm run ai:server       # http://127.0.0.1:8787 — a local Postgres (PGlite) in .data/ai-db unless DATABASE_URL is set
 npm run ai:migrate      # apply supabase/migrations to DATABASE_URL (the server also applies them on start)
 npm run ai:token -- dev_athlete 1   # DEVELOPMENT ONLY: a dev1 token for curl; refused by production servers
@@ -81,7 +81,7 @@ backend/http.ts         node:http adapter: exact-origin CORS, observed client ad
 backend/ai/handler.ts   routes: /ai/auth/register|refresh|revoke, /ai/chat, /ai/actions/:id/confirm|cancel; request ids
 backend/ai/auth.ts      per-install athlete identity: 15-min access tokens, rotating refresh tokens (hashed, reuse revokes)
 backend/ai/store.ts     persistent actions (exactly-once via conditional UPDATEs) and per-athlete rate limits, in Postgres
-backend/ai/service.ts   OpenAI Responses API loop (store: false), tool-round/call caps, deadline, safe errors
+backend/ai/service.ts   Chat Completions tool loop (Groq; OpenAI optional), tool-round/call caps, deadline, safe errors
 backend/ai/tools.ts     12 read-only tools + propose tools for enabled actions (nothing executes from the model)
 backend/ai/actions.ts   action contracts; preview/execution through the app's own service on a private copy
 backend/db/             pg driver, migrator; local.ts / test-postgres.mjs = PGlite for development and tests only

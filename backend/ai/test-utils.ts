@@ -1,5 +1,5 @@
 // Test fixtures only — not imported by the server.
-import type { Response as ModelResponse, ResponseCreateParamsNonStreaming } from 'openai/resources/responses/responses';
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
 import { memoryStore, writeAll } from '../../src/data/store';
 import type { ApexData } from '../../src/domain/types';
 import { createApex } from '../../src/services/apex';
@@ -11,7 +11,7 @@ import { DEFAULT_LIMITS, loadAIConfig, type AILimits, type Environment } from '.
 import { snapshotSource, type AthleteDataSource } from './data';
 import type { ChatDeps } from './handler';
 import { signToken, type AILogEvent } from './security';
-import { AIService, type ResponsesClient } from './service';
+import { AIService, type ChatClient } from './service';
 import { ActionStore, RateLimits } from './store';
 
 export const NOW = new Date(2026, 9, 7, 18); // Wed 7 Oct 2026, 18:00 — Legs on the program
@@ -59,27 +59,34 @@ export const trainedAthlete = () =>
     bodyMetrics: [{ id: 'bw1', date: '2026-10-01', kind: 'bodyweight', value: 80 }],
   });
 
-// ---------- a scripted stand-in for the OpenAI Responses API ----------
+// ---------- a scripted stand-in for the model (Chat Completions: Groq / OpenAI) ----------
 
-export type Body = ResponseCreateParamsNonStreaming & { input: Record<string, unknown>[] };
-type Script = (body: Body, n: number, opts?: { signal?: AbortSignal; timeout?: number }) => ModelResponse | Promise<ModelResponse>;
+export type Body = ChatCompletionCreateParamsNonStreaming & { messages: Record<string, unknown>[] };
+type Script = (body: Body, n: number, opts?: { signal?: AbortSignal; timeout?: number }) => ChatCompletion | Promise<ChatCompletion>;
 
-export const res = (...output: unknown[]) => ({ id: 'resp_test', object: 'response', status: 'completed', output }) as unknown as ModelResponse;
-export const say = (text: string) => res({ type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] });
+/** A tool call as the model writes it. */
 export const callTool = (name: string, args: object = {}, n = 1) =>
-  ({ type: 'function_call', id: `fc_${name}_${n}`, call_id: `call_${name}_${n}`, name, arguments: JSON.stringify(args), status: 'completed' });
+  ({ id: `call_${name}_${n}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
+const completion = (message: Record<string, unknown>, finish_reason: string) =>
+  ({ id: 'chatcmpl_test', object: 'chat.completion', created: 0, model: 'test-model', choices: [{ index: 0, finish_reason, logprobs: null, message: { role: 'assistant', refusal: null, ...message } }] }) as unknown as ChatCompletion;
+/** A reply that calls tools. */
+export const res = (...toolCalls: unknown[]) => completion({ content: null, tool_calls: toolCalls }, 'tool_calls');
+/** A plain answer (`finish` "length" = cut off). */
+export const say = (text: string, finish = 'stop') => completion({ content: text }, finish);
 
 /** Tool results the service sent back to the model in a request body, parsed. */
 export const toolOutputs = (body: Body) =>
-  body.input.filter((i) => i.type === 'function_call_output').map((i) => JSON.parse(i.output as string));
+  body.messages.filter((m) => m.role === 'tool').map((m) => JSON.parse(m.content as string));
 
 export function fakeClient(script: Script) {
   const bodies: Body[] = [];
-  const client: ResponsesClient = {
-    responses: {
-      async create(body, opts) {
-        bodies.push(JSON.parse(JSON.stringify(body)));
-        return script(bodies[bodies.length - 1], bodies.length - 1, opts);
+  const client: ChatClient = {
+    chat: {
+      completions: {
+        async create(body, opts) {
+          bodies.push(JSON.parse(JSON.stringify(body)));
+          return script(bodies[bodies.length - 1], bodies.length - 1, opts);
+        },
       },
     },
   };

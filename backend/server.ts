@@ -5,7 +5,7 @@ import OpenAI from 'openai';
 import { loadCa, migrate, pgDb, type Db } from './db/db';
 import { loadServerConfig } from './ai/config';
 import { createDeps } from './ai/handler';
-import type { ResponsesClient } from './ai/service';
+import type { ChatClient } from './ai/service';
 import { createAIServer, startupFailure } from './http';
 
 async function main() {
@@ -28,11 +28,12 @@ async function main() {
   // migrations run before the server listens; if they fail, the process exits and never serves an old schema
   const applied = await migrate(db);
 
-  const deps = createDeps(config, db, (apiKey) => new OpenAI({ apiKey, maxRetries: 1 }) as unknown as ResponsesClient);
+  // the OpenAI SDK as an HTTP client for the configured provider (Groq's OpenAI-compatible endpoint, or OpenAI)
+  const deps = createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 }) as unknown as ChatClient);
   const port = Number(process.env.PORT) || 8787;
   const host = process.env.HOST || '127.0.0.1';
   createAIServer(deps, { corsOrigins: config.corsOrigins, trustProxy: config.trustProxy }).listen(port, host, () =>
-    console.info(JSON.stringify({ event: 'ai.server', env: config.env, host, port, ai: !!deps.ai, migrations: applied.length, registration: config.registration, cors: config.corsOrigins.length })));
+    console.info(JSON.stringify({ event: 'ai.server', env: config.env, host, port, ai: !!deps.ai, provider: config.ai?.provider ?? null, migrations: applied.length, registration: config.registration, cors: config.corsOrigins.length })));
 }
 
 main().catch((e) => {

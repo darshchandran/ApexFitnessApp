@@ -1,7 +1,7 @@
-// AIService: one athlete message → a Responses API loop with APEX's controlled tools → a structured
-// answer. Bounded: a deadline, a cap on tool rounds and calls, and every failure mapped to a safe error.
-import type { Response as ModelResponse, ResponseCreateParamsNonStreaming, ResponseFunctionToolCall, ResponseInputItem } from 'openai/resources/responses/responses';
-import { toResponseInputItems } from 'openai/lib/responses/ResponseInputItems';
+// AIService: one athlete message → a Chat Completions tool loop (Groq, or OpenAI) with APEX's
+// controlled tools → a structured answer. Bounded: a deadline, a cap on tool rounds and calls, and
+// every failure mapped to a safe error.
+import type { ChatCompletion, ChatCompletionCreateParamsNonStreaming, ChatCompletionMessageParam, ChatCompletionMessageToolCall } from 'openai/resources/chat/completions';
 import type { ApexData, ISODate } from '../../src/domain/types';
 import { clientAction, type ActionStore } from './store';
 import type { AIConfig, ModelMode } from './config';
@@ -10,9 +10,9 @@ import { AIError, type AIMessageResponse } from './schemas';
 import { consoleLogger, safetyId, type AILogger } from './security';
 import { runTool, toolDefinitions, TOOLS, type ToolContext } from './tools';
 
-/** The slice of the OpenAI SDK the service uses — the real client, or a fake in tests. */
-export interface ResponsesClient {
-  responses: { create(body: ResponseCreateParamsNonStreaming, options?: { signal?: AbortSignal; timeout?: number }): Promise<ModelResponse> };
+/** The slice of the OpenAI SDK the service uses (pointed at Groq or OpenAI) — or a fake in tests. */
+export interface ChatClient {
+  chat: { completions: { create(body: ChatCompletionCreateParamsNonStreaming, options?: { signal?: AbortSignal; timeout?: number }): Promise<ChatCompletion> } };
 }
 
 export interface Turn {
@@ -59,24 +59,16 @@ export interface ChatResult extends AIMessageResponse {
   rounds: number;
 }
 
-const isCall = (o: ModelResponse['output'][number]): o is ResponseFunctionToolCall => o?.type === 'function_call';
-const wellFormed = (c: ResponseFunctionToolCall) => typeof c.call_id === 'string' && typeof c.name === 'string' && typeof c.arguments === 'string';
+type ToolCall = Extract<ChatCompletionMessageToolCall, { type: 'function' }>;
+const wellFormed = (c: ChatCompletionMessageToolCall): c is ToolCall =>
+  c?.type === 'function' && typeof c.id === 'string' && typeof c.function?.name === 'string' && typeof c.function?.arguments === 'string';
 const TOOL_DEFS = toolDefinitions();
 const TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
 
-/** The assistant's text from message items (or a refusal). */
-function textOf(res: ModelResponse) {
-  return res.output
-    .flatMap((o) => (o?.type === 'message' && Array.isArray(o.content) ? o.content : []))
-    .map((c) => (c.type === 'output_text' ? c.text : c.type === 'refusal' ? c.refusal : ''))
-    .join('')
-    .trim();
-}
-
 /**
- * What OpenAI said, for operators: HTTP status, its error code (an identifier, e.g.
+ * What the provider said, for operators: HTTP status, its error code (an identifier, e.g.
  * rate_limit_exceeded) and the account's published limits — never the message, which can carry
- * account details.
+ * account details or the model's output.
  */
 function upstreamFacts(e: unknown) {
   const x = e as { status?: unknown; code?: unknown; type?: unknown; headers?: { get?: (k: string) => string | null } };
@@ -85,15 +77,29 @@ function upstreamFacts(e: unknown) {
   return { status: typeof x.status === 'number' ? x.status : undefined, code: id, limitRequests: header('x-ratelimit-limit-requests'), limitTokens: header('x-ratelimit-limit-tokens') };
 }
 
+const upstreamCode = (e: unknown) => String((e as { code?: unknown })?.code ?? '');
+
+/** Seconds to wait from the provider's retry-after (bounded), for the client. */
+function retryAfter(e: unknown) {
+  const h = (e as { headers?: { get?: (k: string) => string | null } })?.headers;
+  const s = Number(typeof h?.get === 'function' ? h.get('retry-after') : NaN);
+  return Number.isFinite(s) && s > 0 ? Math.min(Math.ceil(s), 300) : 60;
+}
+
 /** Upstream failures → a log category and the code the client sees. */
 function classify(e: unknown): AIError {
   const status = (e as { status?: unknown })?.status;
   const name = (e as { name?: unknown })?.name;
   if (name === 'APIConnectionTimeoutError') return new AIError('timeout', 'upstream_timeout');
   if (status === 401 || status === 403) return new AIError('ai_unavailable', 'upstream_auth');
-  // OpenAI answers 429 both for rate limits and for an account without credit: operators need to tell them apart
-  if (status === 429) return new AIError('ai_unavailable', ['insufficient_quota', 'credit_balance_exhausted'].includes(String((e as { code?: unknown })?.code)) ? 'upstream_quota' : 'upstream_rate_limit');
-  if (typeof status === 'number' && status >= 500) return new AIError('ai_unavailable', 'upstream_unavailable');
+  if (status === 429) {
+    // an account without credit won't recover by waiting; a rate limit (Groq's free tier) will
+    if (['insufficient_quota', 'credit_balance_exhausted'].includes(upstreamCode(e))) return new AIError('ai_unavailable', 'upstream_quota');
+    return Object.assign(new AIError('ai_busy', 'upstream_rate_limit'), { retryAfter: retryAfter(e) });
+  }
+  if (status === 413) return new AIError('ai_unavailable', 'upstream_request_too_large'); // e.g. over the tokens-per-minute limit
+  if (status === 498 || (typeof status === 'number' && status >= 500)) return new AIError('ai_unavailable', 'upstream_unavailable');
+  if (upstreamCode(e) === 'tool_use_failed') return new AIError('model_error', 'upstream_tool_call_failed');
   if (typeof status === 'number') return new AIError('model_error', 'upstream_rejected');
   if (name === 'APIConnectionError') return new AIError('ai_unavailable', 'upstream_network');
   return new AIError('model_error', 'unexpected');
@@ -104,7 +110,7 @@ export class AIService {
   readonly conversations: ConversationStore;
   readonly actions: ActionStore;
 
-  constructor(private deps: { client: ResponsesClient; config: AIConfig; actions: ActionStore; logger?: AILogger; conversations?: ConversationStore; now?: () => number }) {
+  constructor(private deps: { client: ChatClient; config: AIConfig; actions: ActionStore; logger?: AILogger; conversations?: ConversationStore; now?: () => number }) {
     this.log = deps.logger ?? consoleLogger;
     this.conversations = deps.conversations ?? new ConversationStore(deps.config.limits.historyTurns);
     this.actions = deps.actions;
@@ -119,7 +125,8 @@ export class AIService {
     const log = chat.log ?? this.log;
     const now = this.deps.now ?? Date.now;
     const model = this.model(chat.mode);
-    const input: ResponseInputItem[] = [
+    const messages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: INSTRUCTIONS },
       ...this.conversations.get(chat.userId, chat.conversationId, now()).map((t) => ({ role: t.role, content: t.content })),
       { role: 'user', content: chat.message },
     ];
@@ -131,11 +138,11 @@ export class AIService {
 
     try {
       for (let rounds = 0; ; rounds++) {
-        const res = await this.call(model, input, abort, deadline - now(), chat.userId, log);
-        const calls = res.output.filter(isCall);
+        const choice = (await this.call(model, messages, abort, () => deadline - now(), chat.userId, log)).choices[0];
+        const calls = choice.message.tool_calls ?? [];
         if (!calls.length) {
-          const text = textOf(res);
-          if (!text) throw new AIError('model_error', res.status === 'incomplete' ? 'incomplete_output' : 'empty_output');
+          const text = (choice.message.content ?? choice.message.refusal ?? '').trim();
+          if (!text) throw new AIError('model_error', choice.finish_reason === 'length' ? 'incomplete_output' : 'empty_output');
           this.conversations.add(chat.userId, chat.conversationId, [{ role: 'user', content: chat.message }, { role: 'assistant', content: text }], now());
           // only a proposal from a turn that finished is kept — it waits for the athlete, bound to them
           const draft = ctx.proposals.at(-1);
@@ -147,18 +154,15 @@ export class AIService {
         }
         if (rounds >= limits.maxToolRounds) throw new AIError('tool_limit');
         if (!calls.every(wellFormed)) throw this.malformed(model, log);
-        try {
-          input.push(...toResponseInputItems(res.output));
-        } catch {
-          throw this.malformed(model, log); // an output item the SDK can't replay
-        }
+        // the model's calls go back verbatim (ids, names, arguments) — never its reasoning text
+        messages.push({ role: 'assistant', content: choice.message.content ?? null, tool_calls: calls.map((c) => ({ id: c.id, type: 'function', function: { name: c.function.name, arguments: c.function.arguments } })) });
         for (const [k, call] of calls.entries()) {
           const t0 = now();
-          const result = k < limits.maxToolCallsPerRound ? await runTool(call.name, call.arguments, ctx) : { ok: false as const, error: 'call_limit' };
-          const known = TOOL_NAMES.has(call.name);
-          if (known) used.add(call.name);
-          log({ event: 'ai.tool', tool: known ? call.name : 'unknown', ok: result.ok, ...(!result.ok && { error: result.error }), ms: now() - t0 });
-          input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(result.ok ? result.output : { error: result.error, ...('detail' in result && { detail: result.detail }) }) });
+          const result = k < limits.maxToolCallsPerRound ? await runTool(call.function.name, call.function.arguments, ctx) : { ok: false as const, error: 'call_limit' };
+          const known = TOOL_NAMES.has(call.function.name);
+          if (known) used.add(call.function.name);
+          log({ event: 'ai.tool', tool: known ? call.function.name : 'unknown', ok: result.ok, ...(!result.ok && { error: result.error }), ms: now() - t0 });
+          messages.push({ role: 'tool', tool_call_id: call.id, content: JSON.stringify(result.ok ? result.output : { error: result.error, ...('detail' in result && { detail: result.detail }) }) });
         }
         if (abort.signal.aborted) throw new AIError('timeout');
       }
@@ -167,31 +171,36 @@ export class AIService {
     }
   }
 
-  private async call(model: string, input: ResponseInputItem[], abort: AbortController, remainingMs: number, userId: string, log: AILogger): Promise<ModelResponse> {
-    if (remainingMs <= 0 || abort.signal.aborted) throw new AIError('timeout');
-    let res: ModelResponse;
-    try {
-      res = await this.deps.client.responses.create(
-        {
-          model,
-          instructions: INSTRUCTIONS,
-          input,
-          tools: TOOL_DEFS,
-          tool_choice: 'auto',
-          parallel_tool_calls: true,
-          store: false, // no athlete conversation kept at OpenAI; reasoning items come back encrypted for replay
-          max_output_tokens: this.deps.config.limits.maxOutputTokens,
-          safety_identifier: safetyId(userId),
-        },
-        { signal: abort.signal, timeout: remainingMs },
-      );
-    } catch (e) {
-      const err = abort.signal.aborted ? new AIError('timeout') : classify(e);
-      log({ event: 'ai.model_error', category: err.category, model, ...(!abort.signal.aborted && { upstream: upstreamFacts(e) }) });
-      throw err;
+  /** One model request. Groq's "tool_use_failed" (the model wrote an unparseable tool call) is sampled once more. */
+  private async call(model: string, messages: ChatCompletionMessageParam[], abort: AbortController, remaining: () => number, userId: string, log: AILogger): Promise<ChatCompletion> {
+    const { provider, limits } = this.deps.config;
+    for (let attempt = 0; ; attempt++) {
+      if (remaining() <= 0 || abort.signal.aborted) throw new AIError('timeout');
+      let res: ChatCompletion;
+      try {
+        res = await this.deps.client.chat.completions.create(
+          {
+            model,
+            messages,
+            tools: TOOL_DEFS,
+            tool_choice: 'auto',
+            max_completion_tokens: limits.maxOutputTokens,
+            // OpenAI only (Groq doesn't take these): nothing stored at OpenAI; an opaque per-athlete id for abuse monitoring
+            ...(provider === 'openai' && { store: false, safety_identifier: safetyId(userId) }),
+            // gpt-oss: little reasoning — answers come from APEX's tools, and Groq's free tier counts every token
+            ...(/gpt-oss/.test(model) && { reasoning_effort: 'low' as const }),
+          },
+          { signal: abort.signal, timeout: remaining() },
+        );
+      } catch (e) {
+        const err = abort.signal.aborted ? new AIError('timeout') : classify(e);
+        log({ event: 'ai.model_error', category: err.category, model, ...(!abort.signal.aborted && { upstream: upstreamFacts(e) }) });
+        if (err.category === 'upstream_tool_call_failed' && attempt === 0) continue;
+        throw err;
+      }
+      if (!res || !Array.isArray(res.choices) || !res.choices[0]?.message) throw this.malformed(model, log);
+      return res;
     }
-    if (!res || !Array.isArray(res.output) || res.status === 'failed') throw this.malformed(model, log);
-    return res;
   }
 
   private malformed(model: string, log: AILogger) {

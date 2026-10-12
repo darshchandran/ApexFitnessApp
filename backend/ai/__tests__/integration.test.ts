@@ -1,6 +1,6 @@
-// End to end over real HTTP: test client → APEX AI server (backend/http.ts) → official OpenAI SDK →
-// a local mock of the Responses API → APEX tools/actions → the device's own service.
-// No real OpenAI key or network: everything listens on 127.0.0.1.
+// End to end over real HTTP: test client → APEX AI server (backend/http.ts) → the OpenAI SDK as
+// Groq's client → a local mock of Groq's Chat Completions endpoint → APEX tools/actions → the
+// device's own service. No real key or network: everything listens on 127.0.0.1.
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import { createServer, request, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -9,10 +9,10 @@ import { todayOverview, type ActionChanges } from '../../../src/services/apex';
 import type { ApexData, WorkoutInstance } from '../../../src/domain/types';
 import { bball } from '../../../src/test-utils';
 import { createAIServer } from '../../http';
-import { loadAIConfig, loadServerConfig } from '../config';
+import { loadAIConfig, loadServerConfig, type AIConfig } from '../config';
 import { createDeps, type ChatDeps } from '../handler';
 import type { AILogEvent } from '../security';
-import { AIService, type ResponsesClient } from '../service';
+import { AIService, type ChatClient } from '../service';
 import { RateLimits, type ActionStore, type ClientAction } from '../store';
 import { device, NOW, SECRET, snapshot, testClock, TODAY, token, week, lazyDb, testActions } from '../test-utils';
 
@@ -41,16 +41,16 @@ async function nodeFetch(input: string | URL | Request, init: RequestInit = {}):
 const listen = (s: Server) => new Promise<string>((r) => s.listen(0, '127.0.0.1', () => r(`http://127.0.0.1:${(s.address() as AddressInfo).port}`)));
 const close = (s: Server) => new Promise<void>((r) => s.close(() => r()));
 
-// ---------- a local stand-in for POST /v1/responses ----------
+// ---------- a local stand-in for Groq's POST /openai/v1/chat/completions ----------
 
 type Item = Record<string, unknown>;
-const seen: { auth?: string; body: { model: string; store: boolean; tools: unknown[]; input: Item[] } }[] = [];
-const msg = (text: string) => ({ type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text, annotations: [] }] });
-const call = (name: string, args: object, n = 1) => ({ type: 'function_call', id: `fc_${n}`, call_id: `call_${name}_${n}`, name, arguments: JSON.stringify(args), status: 'completed' });
+const seen: { auth?: string; path?: string; body: { model: string; tools: unknown[]; messages: Item[] } & Item }[] = [];
+const msg = (text: string) => ({ content: text });
+const call = (name: string, args: object, n = 1) => ({ id: `call_${name}_${n}`, type: 'function', function: { name, arguments: JSON.stringify(args) } });
 
 /** Scripted model: picks a tool from the athlete's words; after tool results, answers from them. */
-function model(input: Item[]) {
-  const last = input.at(-1)!;
+function model(messages: Item[]): Item[] {
+  const last = messages.at(-1)!;
   if (last.role === 'user') {
     const text = String(last.content);
     if (text.startsWith('Log basketball')) return [call('propose_log_basketball', { duration_min: 90, rpe: 8, session_type: null, lower_body_fatigue: null, date: null })];
@@ -58,8 +58,8 @@ function model(input: Item[]) {
     if (text.startsWith('How did that')) return [call('get_recent_sessions', { days: 1 }, 1), call('get_current_adaptation', {}, 2)];
     return [msg('Hello.')];
   }
-  const userAt = input.map((i) => i.role).lastIndexOf('user');
-  const outputs = input.slice(userAt).filter((i) => i.type === 'function_call_output').map((i) => JSON.parse(String(i.output)));
+  const userAt = messages.map((m) => m.role).lastIndexOf('user');
+  const outputs = messages.slice(userAt).filter((m) => m.role === 'tool').map((m) => JSON.parse(String(m.content)));
   const proposal = outputs.find((o) => o.status);
   if (proposal) return [msg(proposal.status === 'awaiting_confirmation' ? `${proposal.summary} Confirm it in the app.` : `I can’t: ${proposal.reason}`)];
   const recent = outputs.find((o) => o.days);
@@ -72,20 +72,26 @@ const mockOpenAI = createServer((req, res) => {
   req.on('data', (c) => (raw += c));
   req.on('end', () => {
     const body = JSON.parse(raw);
-    seen.push({ auth: req.headers.authorization, body });
-    const output = req.url === '/v1/responses' ? model(body.input) : [];
-    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ id: `resp_${seen.length}`, object: 'response', created_at: 0, status: 'completed', model: body.model, output }));
+    seen.push({ auth: req.headers.authorization, path: req.url, body });
+    const out = req.url === '/openai/v1/chat/completions' ? model(body.messages) : [];
+    const calls = out.filter((o) => o.type === 'function');
+    const message = calls.length ? { role: 'assistant', content: null, tool_calls: calls } : { role: 'assistant', content: out[0]?.content ?? null };
+    res.writeHead(200, { 'content-type': 'application/json' })
+      .end(JSON.stringify({ id: `chatcmpl_${seen.length}`, object: 'chat.completion', created: 0, model: body.model, choices: [{ index: 0, finish_reason: calls.length ? 'tool_calls' : 'stop', logprobs: null, message }] }));
   });
 });
 
 // ---------- the APEX AI server, wired exactly like backend/server.ts ----------
 
-const API_KEY = 'sk-mock-not-a-real-key';
+const API_KEY = 'gsk_mockNotARealKey0123456789';
 let openaiUrl = '';
 const logs: AILogEvent[] = [];
-// development: the model is a local mock (production refuses mock endpoints and non-OpenAI keys)
-const env = () => ({ APEX_ENV: 'development', OPENAI_API_KEY: API_KEY, APEX_AI_MODEL: 'mock-model', APEX_AUTH_SECRET: SECRET });
-const makeClient = (apiKey: string) => new OpenAI({ apiKey, baseURL: `${openaiUrl}/v1`, maxRetries: 0, fetch: nodeFetch }) as unknown as ResponsesClient;
+// development, configured for Groq; the test points Groq's client at the local mock instead of api.groq.com
+const env = () => ({ APEX_ENV: 'development', GROQ_API_KEY: API_KEY, APEX_AI_MODEL: 'mock-model', APEX_AUTH_SECRET: SECRET });
+const makeClient = (ai: AIConfig) => {
+  expect([ai.provider, ai.baseURL]).toEqual(['groq', 'https://api.groq.com/openai/v1']);
+  return new OpenAI({ apiKey: ai.apiKey, baseURL: `${openaiUrl}/openai/v1`, maxRetries: 0, fetch: nodeFetch }) as unknown as ChatClient;
+};
 
 let instances = 0;
 /** A fresh server process on the shared database, as after a restart. `actions` swaps in a store with a test clock. */
@@ -94,7 +100,7 @@ async function startApex(actions?: ActionStore) {
   deps.rate = new RateLimits(deps.db, `it-${Date.now()}-${instances++}:`);
   if (actions) {
     deps.actions = actions;
-    deps.ai = new AIService({ client: makeClient(API_KEY), config: loadAIConfig(env()), logger: (e) => logs.push(e), actions });
+    deps.ai = new AIService({ client: makeClient(loadAIConfig(env())), config: loadAIConfig(env()), logger: (e) => logs.push(e), actions });
   }
   deps.now = () => NOW; // fixtures live on Wed 7 Oct 2026
   const server = createAIServer(deps);
@@ -152,8 +158,9 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
     const action = proposed.json.action as ClientAction;
     expect(action).toMatchObject({ type: 'log_basketball', status: 'pending', requires_confirmation: true, arguments: { date: TODAY, duration_min: 90, rpe: 8 } });
     expect(seen).toHaveLength(2);
-    expect(seen[0].auth).toBe(`Bearer ${API_KEY}`); // the server's key goes to OpenAI…
-    expect(seen.every((s) => s.body.store === false && s.body.tools.length === 14)).toBe(true);
+    expect(seen[0].auth).toBe(`Bearer ${API_KEY}`); // the server's Groq key goes to the provider…
+    // Groq's Chat Completions endpoint, with nothing OpenAI-only in the request
+    expect(seen.every((s) => s.path === '/openai/v1/chat/completions' && s.body.tools.length === 14 && !('store' in s.body) && !('safety_identifier' in s.body))).toBe(true);
     expect(JSON.stringify(seen)).not.toContain(SECRET); // …the athlete's token never does
     expect(snapshot(app)).toEqual(before); // proposing changed nothing
 
@@ -177,7 +184,7 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
     const followUp = await chat(apex.url, app, 'How did that affect today’s workout?');
     expect(followUp.status).toBe(200);
     expect(followUp.json.message).toBe(`Logged today: Basketball 90 min @ RPE 8. ${gym(after).decision.headline}`);
-    expect(seen[2].body.input.slice(0, 4)).toEqual([
+    expect(seen[2].body.messages.slice(1, 5)).toEqual([
       { role: 'user', content: 'Log basketball for 90 minutes at RPE 8.' },
       { role: 'assistant', content: proposed.json.message },
       { role: 'assistant', content: confirmed.json.message },

@@ -10,7 +10,7 @@ import { route, type ChatDeps } from '../handler';
 import { callTool, device, NOW, res, say, snapshot, testActions, testClock, testDeps, TODAY, week, type Body } from '../test-utils';
 
 type Device = Awaited<ReturnType<typeof device>>;
-const lastRole = (b: Body) => (b.input as Record<string, unknown>[]).at(-1)?.role;
+const lastRole = (b: Body) => b.messages.at(-1)?.role;
 /** Proposes `tool(args)` for each new question, otherwise answers. */
 const proposer = (tool: string, args: object) => (b: Body) => (lastRole(b) === 'user' ? res(callTool(tool, args)) : say('Waiting for your confirmation.'));
 const BASKETBALL = { duration_min: 90, rpe: 8, session_type: null, lower_body_fatigue: null, date: null };
@@ -25,7 +25,7 @@ async function phone(deps: ChatDeps, app?: Device, opts: { now?: () => Date } = 
   const ai = createAssistant({
     store: memoryStore(),
     apex: athlete,
-    now: opts.now,
+    now: opts.now ?? (() => NOW), // the backend runs at NOW too (tokens, expiries)
     async fetch(url, init) {
       if (net.offline) throw new TypeError('Network request failed');
       const path = new URL(url).pathname;
@@ -56,7 +56,7 @@ describe('the app client and the Phase 5B backend', () => {
     expect(ai.getState().messages.at(-1)).toMatchObject({ role: 'apex', text: 'Your load today is low.', checked: ['training load'] });
     await ai.send('And this week?');
     expect(sent.filter((x) => x.path === '/ai/chat')[1].body.conversation_id).toBe(ai.getState().conversationId);
-    expect(bodies[2].input.slice(0, 2)).toEqual([{ role: 'user', content: 'What is my current training load?' }, { role: 'assistant', content: 'Your load today is low.' }]);
+    expect(bodies[2].messages.slice(1, 3)).toEqual([{ role: 'user', content: 'What is my current training load?' }, { role: 'assistant', content: 'Your load today is low.' }]);
     expect(snapshot(app)).toEqual(before);
   });
 

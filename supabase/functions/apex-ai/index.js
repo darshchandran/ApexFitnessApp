@@ -24,13 +24,20 @@ var DEFAULT_LIMITS = {
   registrationsPerHour: 500,
   refreshesPerWindow: 120
 };
+var PROVIDERS = {
+  groq: { keyVar: "GROQ_API_KEY", baseURL: "https://api.groq.com/openai/v1", keyFormat: /^gsk_[A-Za-z0-9]{20,}$/ },
+  openai: { keyVar: "OPENAI_API_KEY", keyFormat: /^sk-[A-Za-z0-9_-]{20,}$/ }
+};
 var AIConfigError = class extends Error {
   name = "AIConfigError";
 };
-var MODEL_NAME = /^[A-Za-z0-9][\w.:-]{0,99}$/;
+var MODEL_NAME = /^[A-Za-z0-9][\w.:/-]{0,99}$/;
 function loadAIConfig(env = process.env, limits = DEFAULT_LIMITS) {
-  const apiKey = env.OPENAI_API_KEY?.trim();
-  if (!apiKey) throw new AIConfigError("OPENAI_API_KEY is not set");
+  const provider = env.APEX_AI_PROVIDER?.trim() || (env.GROQ_API_KEY?.trim() ? "groq" : "openai");
+  if (provider !== "groq" && provider !== "openai") throw new AIConfigError('APEX_AI_PROVIDER must be "groq" or "openai"');
+  const { keyVar, baseURL } = PROVIDERS[provider];
+  const apiKey = env[keyVar]?.trim();
+  if (!apiKey) throw new AIConfigError(`${keyVar} is not set`);
   const model = (name, fallback) => {
     const v = env[name]?.trim() || fallback;
     if (!v) throw new AIConfigError(`${name} is not set`);
@@ -38,7 +45,13 @@ function loadAIConfig(env = process.env, limits = DEFAULT_LIMITS) {
     return v;
   };
   const base = model("APEX_AI_MODEL");
-  return { apiKey, models: { default: base, fast: model("APEX_FAST_MODEL", base), deep: model("APEX_DEEP_MODEL", base) }, limits };
+  return {
+    provider,
+    apiKey,
+    baseURL: provider === "openai" ? env.OPENAI_BASE_URL?.trim() || void 0 : baseURL,
+    models: { default: base, fast: model("APEX_FAST_MODEL", base), deep: model("APEX_DEEP_MODEL", base) },
+    limits
+  };
 }
 var ConfigError = class extends Error {
   constructor(problems) {
@@ -86,11 +99,13 @@ function loadServerConfig(env = process.env) {
   try {
     ai = loadAIConfig(env);
   } catch (e) {
-    if (prod || env.OPENAI_API_KEY || env.APEX_AI_MODEL) problems.push(e.message);
+    if (prod || env.OPENAI_API_KEY || env.GROQ_API_KEY || env.APEX_AI_PROVIDER || env.APEX_AI_MODEL) problems.push(e.message);
   }
   if (prod) {
     if (env.OPENAI_BASE_URL) problems.push("OPENAI_BASE_URL must not be set in production (no mock or proxy model endpoints)");
-    if (ai && !/^sk-[A-Za-z0-9_-]{20,}$/.test(ai.apiKey)) problems.push("OPENAI_API_KEY does not look like an OpenAI API key");
+    if (ai && !PROVIDERS[ai.provider].keyFormat.test(ai.apiKey)) {
+      problems.push(`${PROVIDERS[ai.provider].keyVar} does not look like ${ai.provider === "groq" ? "a Groq" : "an OpenAI"} API key`);
+    }
   }
   if (problems.length) throw new ConfigError(problems);
   return {
@@ -2915,6 +2930,7 @@ var ERRORS = {
   method_not_allowed: { status: 405, message: "Use POST." },
   not_found: { status: 404, message: "Not found." },
   ai_unavailable: { status: 503, message: `APEX AI is unavailable right now. ${UNAFFECTED}` },
+  ai_busy: { status: 429, message: `APEX AI is busy right now. Try again in a minute. ${UNAFFECTED}` },
   timeout: { status: 504, message: `APEX AI took too long to answer. ${UNAFFECTED}` },
   model_error: { status: 502, message: `APEX AI could not answer that. ${UNAFFECTED}` },
   tool_limit: { status: 502, message: `That question needed too many steps. Try asking something narrower. ${UNAFFECTED}` },
@@ -2938,6 +2954,8 @@ var AIError = class extends Error {
   code;
   category;
   name = "AIError";
+  /** Seconds the client should wait (ai_busy). */
+  retryAfter;
 };
 
 // backend/ai/actions.ts
@@ -3220,9 +3238,6 @@ var snapshotSource = {
     return deepFreeze(hydrate(data, now).data);
   }
 };
-
-// backend/ai/service.ts
-import { toResponseInputItems } from "npm:openai@7.27.0/lib/responses/ResponseInputItems";
 
 // backend/ai/store.ts
 import { createHash as createHash4, randomBytes as randomBytes2, randomUUID } from "node:crypto";
@@ -3925,7 +3940,7 @@ var PROPOSE_TOOLS = Object.keys(ACTIONS).flatMap((type) => {
 });
 var TOOLS = [...READ_TOOLS, ...PROPOSE_TOOLS];
 var BY_NAME = new Map(TOOLS.map((t) => [t.name, t]));
-var toolDefinitions = () => TOOLS.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: t.input, strict: true }));
+var toolDefinitions = () => TOOLS.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.input } }));
 async function runTool(name, rawArgs, ctx) {
   const tool = BY_NAME.get(name);
   if (!tool) return { ok: false, error: "unknown_tool" };
@@ -3971,26 +3986,33 @@ var ConversationStore = class {
     if (this.map.size > this.maxConversations) this.map.delete(this.map.keys().next().value);
   }
 };
-var isCall = (o) => o?.type === "function_call";
-var wellFormed = (c) => typeof c.call_id === "string" && typeof c.name === "string" && typeof c.arguments === "string";
+var wellFormed = (c) => c?.type === "function" && typeof c.id === "string" && typeof c.function?.name === "string" && typeof c.function?.arguments === "string";
 var TOOL_DEFS = toolDefinitions();
 var TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
-function textOf(res) {
-  return res.output.flatMap((o) => o?.type === "message" && Array.isArray(o.content) ? o.content : []).map((c) => c.type === "output_text" ? c.text : c.type === "refusal" ? c.refusal : "").join("").trim();
-}
 function upstreamFacts(e) {
   const x = e;
   const id = [x.code, x.type].find((v) => typeof v === "string" && /^[a-z_]{1,40}$/.test(v));
   const header = (k) => typeof x.headers?.get === "function" ? x.headers.get(k)?.match(/^\d{1,12}$/)?.[0] : void 0;
   return { status: typeof x.status === "number" ? x.status : void 0, code: id, limitRequests: header("x-ratelimit-limit-requests"), limitTokens: header("x-ratelimit-limit-tokens") };
 }
+var upstreamCode = (e) => String(e?.code ?? "");
+function retryAfter(e) {
+  const h = e?.headers;
+  const s = Number(typeof h?.get === "function" ? h.get("retry-after") : NaN);
+  return Number.isFinite(s) && s > 0 ? Math.min(Math.ceil(s), 300) : 60;
+}
 function classify(e) {
   const status = e?.status;
   const name = e?.name;
   if (name === "APIConnectionTimeoutError") return new AIError("timeout", "upstream_timeout");
   if (status === 401 || status === 403) return new AIError("ai_unavailable", "upstream_auth");
-  if (status === 429) return new AIError("ai_unavailable", ["insufficient_quota", "credit_balance_exhausted"].includes(String(e?.code)) ? "upstream_quota" : "upstream_rate_limit");
-  if (typeof status === "number" && status >= 500) return new AIError("ai_unavailable", "upstream_unavailable");
+  if (status === 429) {
+    if (["insufficient_quota", "credit_balance_exhausted"].includes(upstreamCode(e))) return new AIError("ai_unavailable", "upstream_quota");
+    return Object.assign(new AIError("ai_busy", "upstream_rate_limit"), { retryAfter: retryAfter(e) });
+  }
+  if (status === 413) return new AIError("ai_unavailable", "upstream_request_too_large");
+  if (status === 498 || typeof status === "number" && status >= 500) return new AIError("ai_unavailable", "upstream_unavailable");
+  if (upstreamCode(e) === "tool_use_failed") return new AIError("model_error", "upstream_tool_call_failed");
   if (typeof status === "number") return new AIError("model_error", "upstream_rejected");
   if (name === "APIConnectionError") return new AIError("ai_unavailable", "upstream_network");
   return new AIError("model_error", "unexpected");
@@ -4014,7 +4036,8 @@ var AIService = class {
     const log = chat.log ?? this.log;
     const now = this.deps.now ?? Date.now;
     const model = this.model(chat.mode);
-    const input = [
+    const messages = [
+      { role: "system", content: INSTRUCTIONS },
       ...this.conversations.get(chat.userId, chat.conversationId, now()).map((t) => ({ role: t.role, content: t.content })),
       { role: "user", content: chat.message }
     ];
@@ -4025,11 +4048,11 @@ var AIService = class {
     const timer = setTimeout(() => abort.abort(), limits.timeoutMs);
     try {
       for (let rounds = 0; ; rounds++) {
-        const res = await this.call(model, input, abort, deadline - now(), chat.userId, log);
-        const calls = res.output.filter(isCall);
+        const choice = (await this.call(model, messages, abort, () => deadline - now(), chat.userId, log)).choices[0];
+        const calls = choice.message.tool_calls ?? [];
         if (!calls.length) {
-          const text = textOf(res);
-          if (!text) throw new AIError("model_error", res.status === "incomplete" ? "incomplete_output" : "empty_output");
+          const text = (choice.message.content ?? choice.message.refusal ?? "").trim();
+          if (!text) throw new AIError("model_error", choice.finish_reason === "length" ? "incomplete_output" : "empty_output");
           this.conversations.add(chat.userId, chat.conversationId, [{ role: "user", content: chat.message }, { role: "assistant", content: text }], now());
           const draft = ctx.proposals.at(-1);
           const action = draft ? await this.actions.create(draft, chat.userId, chat.conversationId) : void 0;
@@ -4046,18 +4069,14 @@ var AIService = class {
         }
         if (rounds >= limits.maxToolRounds) throw new AIError("tool_limit");
         if (!calls.every(wellFormed)) throw this.malformed(model, log);
-        try {
-          input.push(...toResponseInputItems(res.output));
-        } catch {
-          throw this.malformed(model, log);
-        }
+        messages.push({ role: "assistant", content: choice.message.content ?? null, tool_calls: calls.map((c) => ({ id: c.id, type: "function", function: { name: c.function.name, arguments: c.function.arguments } })) });
         for (const [k, call] of calls.entries()) {
           const t0 = now();
-          const result = k < limits.maxToolCallsPerRound ? await runTool(call.name, call.arguments, ctx) : { ok: false, error: "call_limit" };
-          const known = TOOL_NAMES.has(call.name);
-          if (known) used.add(call.name);
-          log({ event: "ai.tool", tool: known ? call.name : "unknown", ok: result.ok, ...!result.ok && { error: result.error }, ms: now() - t0 });
-          input.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(result.ok ? result.output : { error: result.error, ..."detail" in result && { detail: result.detail } }) });
+          const result = k < limits.maxToolCallsPerRound ? await runTool(call.function.name, call.function.arguments, ctx) : { ok: false, error: "call_limit" };
+          const known = TOOL_NAMES.has(call.function.name);
+          if (known) used.add(call.function.name);
+          log({ event: "ai.tool", tool: known ? call.function.name : "unknown", ok: result.ok, ...!result.ok && { error: result.error }, ms: now() - t0 });
+          messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(result.ok ? result.output : { error: result.error, ..."detail" in result && { detail: result.detail } }) });
         }
         if (abort.signal.aborted) throw new AIError("timeout");
       }
@@ -4065,32 +4084,36 @@ var AIService = class {
       clearTimeout(timer);
     }
   }
-  async call(model, input, abort, remainingMs, userId, log) {
-    if (remainingMs <= 0 || abort.signal.aborted) throw new AIError("timeout");
-    let res;
-    try {
-      res = await this.deps.client.responses.create(
-        {
-          model,
-          instructions: INSTRUCTIONS,
-          input,
-          tools: TOOL_DEFS,
-          tool_choice: "auto",
-          parallel_tool_calls: true,
-          store: false,
-          // no athlete conversation kept at OpenAI; reasoning items come back encrypted for replay
-          max_output_tokens: this.deps.config.limits.maxOutputTokens,
-          safety_identifier: safetyId(userId)
-        },
-        { signal: abort.signal, timeout: remainingMs }
-      );
-    } catch (e) {
-      const err = abort.signal.aborted ? new AIError("timeout") : classify(e);
-      log({ event: "ai.model_error", category: err.category, model, ...!abort.signal.aborted && { upstream: upstreamFacts(e) } });
-      throw err;
+  /** One model request. Groq's "tool_use_failed" (the model wrote an unparseable tool call) is sampled once more. */
+  async call(model, messages, abort, remaining, userId, log) {
+    const { provider, limits } = this.deps.config;
+    for (let attempt = 0; ; attempt++) {
+      if (remaining() <= 0 || abort.signal.aborted) throw new AIError("timeout");
+      let res;
+      try {
+        res = await this.deps.client.chat.completions.create(
+          {
+            model,
+            messages,
+            tools: TOOL_DEFS,
+            tool_choice: "auto",
+            max_completion_tokens: limits.maxOutputTokens,
+            // OpenAI only (Groq doesn't take these): nothing stored at OpenAI; an opaque per-athlete id for abuse monitoring
+            ...provider === "openai" && { store: false, safety_identifier: safetyId(userId) },
+            // gpt-oss: little reasoning — answers come from APEX's tools, and Groq's free tier counts every token
+            .../gpt-oss/.test(model) && { reasoning_effort: "low" }
+          },
+          { signal: abort.signal, timeout: remaining() }
+        );
+      } catch (e) {
+        const err = abort.signal.aborted ? new AIError("timeout") : classify(e);
+        log({ event: "ai.model_error", category: err.category, model, ...!abort.signal.aborted && { upstream: upstreamFacts(e) } });
+        if (err.category === "upstream_tool_call_failed" && attempt === 0) continue;
+        throw err;
+      }
+      if (!res || !Array.isArray(res.choices) || !res.choices[0]?.message) throw this.malformed(model, log);
+      return res;
     }
-    if (!res || !Array.isArray(res.output) || res.status === "failed") throw this.malformed(model, log);
-    return res;
   }
   malformed(model, log) {
     log({ event: "ai.model_error", category: "malformed_response", model });
@@ -4101,8 +4124,8 @@ var AIService = class {
 // backend/ai/handler.ts
 function createDeps(config, db, makeClient, logger = consoleLogger) {
   const actions = new ActionStore(db);
-  const ai = config.ai && new AIService({ client: makeClient(config.ai.apiKey), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
-  if (!ai) logger({ event: "ai.config", problem: "OPENAI_API_KEY / APEX_AI_MODEL not set: chat is unavailable (development)" });
+  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
+  if (!ai) logger({ event: "ai.config", problem: "no AI provider key / APEX_AI_MODEL set: chat is unavailable (development)" });
   return {
     env: config.env,
     secret: config.authSecret,
@@ -4252,7 +4275,7 @@ async function handleChat(req, deps, ctx = { rid: "", log: deps.logger, clientIp
     if (out.action) ctx.log({ event: "ai.action", op: "propose", type: out.action.type, ok: true });
     return reply(200, out);
   } catch (e) {
-    if (e instanceof AIError) return fail(e.code);
+    if (e instanceof AIError) return fail(e.code, {}, e.retryAfter ? { "retry-after": String(e.retryAfter) } : {});
     const down = unavailable(e);
     ctx.log({ event: "ai.error", where: "chat", category: down ? "database_unavailable" : "internal" });
     return fail(down ? "ai_unavailable" : "internal");
@@ -4359,7 +4382,9 @@ var startupFailure = (e) => e instanceof ConfigError ? { event: "ai.config", pro
 // backend/edge.ts
 function edgeEnv(env) {
   return {
-    APEX_AI_MODEL: "gpt-5-mini",
+    // Groq, free tier: a production model with tool use
+    APEX_AI_PROVIDER: "groq",
+    APEX_AI_MODEL: "openai/gpt-oss-120b",
     APEX_AI_CORS_ORIGINS: "none",
     APEX_AI_REGISTRATION: "open",
     ...env,
@@ -4379,8 +4404,8 @@ async function start() {
   const config = loadServerConfig({ ...env, APEX_AUTH_SECRET: env.APEX_AUTH_SECRET ?? vault });
   const applied = (await pendingMigrations(db, define_APEX_MIGRATIONS_default)).length ? await migrate(db, define_APEX_MIGRATIONS_default) : [];
   const tls = (await db.query("select version as v from pg_stat_ssl where pid = pg_backend_pid()")).rows[0]?.v ?? "none";
-  const deps = { ...createDeps(config, db, (apiKey) => new OpenAI({ apiKey, maxRetries: 1 })), migrations: define_APEX_MIGRATIONS_default };
-  console.info(JSON.stringify({ event: "ai.server", env: config.env, runtime: "supabase-edge", ai: !!deps.ai, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
+  const deps = { ...createDeps(config, db, (ai) => new OpenAI({ apiKey: ai.apiKey, baseURL: ai.baseURL, maxRetries: 1 })), migrations: define_APEX_MIGRATIONS_default };
+  console.info(JSON.stringify({ event: "ai.server", env: config.env, runtime: "supabase-edge", ai: !!deps.ai, provider: config.ai?.provider ?? null, migrations: applied.length, db_tls: tls, registration: config.registration, cors: config.corsOrigins.length }));
   return { deps, cors: config.corsOrigins };
 }
 var json2 = (status, body) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });

@@ -151,7 +151,7 @@ export const confirmSchema = (): Schema => ({
 
 export type AIErrorCode =
   | 'unauthorized' | 'rate_limited' | 'invalid_request' | 'payload_too_large' | 'method_not_allowed' | 'not_found'
-  | 'ai_unavailable' | 'timeout' | 'model_error' | 'tool_limit' | 'internal'
+  | 'ai_unavailable' | 'ai_busy' | 'timeout' | 'model_error' | 'tool_limit' | 'internal'
   | 'action_expired' | 'action_cancelled' | 'action_not_pending' | 'arguments_changed' | 'action_not_allowed' | 'action_failed'
   | 'action_in_progress' | 'registration_closed';
 
@@ -164,6 +164,7 @@ export const ERRORS: Record<AIErrorCode, { status: number; message: string }> = 
   method_not_allowed: { status: 405, message: 'Use POST.' },
   not_found: { status: 404, message: 'Not found.' },
   ai_unavailable: { status: 503, message: `APEX AI is unavailable right now. ${UNAFFECTED}` },
+  ai_busy: { status: 429, message: `APEX AI is busy right now. Try again in a minute. ${UNAFFECTED}` },
   timeout: { status: 504, message: `APEX AI took too long to answer. ${UNAFFECTED}` },
   model_error: { status: 502, message: `APEX AI could not answer that. ${UNAFFECTED}` },
   tool_limit: { status: 502, message: `That question needed too many steps. Try asking something narrower. ${UNAFFECTED}` },
@@ -188,6 +189,8 @@ export interface AIErrorBody {
 /** `category` is for logs (e.g. upstream_rate_limit); `code` is what the client sees. */
 export class AIError extends Error {
   name = 'AIError';
+  /** Seconds the client should wait (ai_busy). */
+  retryAfter?: number;
   constructor(public code: AIErrorCode, public category: string = code) {
     super(code);
   }

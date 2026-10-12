@@ -13,7 +13,7 @@ type Device = Awaited<ReturnType<typeof device>>;
 type Store = ActionStore;
 type Ok = Extract<ActionResult, { success: true }>;
 type Confirmed = { action: ClientAction; result: Ok & { result: Record<string, any> & { changes: ActionChanges } }; message: string; error?: { code: string } };
-const lastRole = (b: Body) => (b.input as Record<string, unknown>[]).at(-1)?.role;
+const lastRole = (b: Body) => b.messages.at(-1)?.role;
 
 /** A model that proposes with `tool` on each new user message, then says it is waiting for confirmation. */
 const proposer = (tool: string, args: object) => (b: Body) =>
@@ -351,7 +351,7 @@ describe('the device side', () => {
     app.applyActionChanges(r.body.result.result.changes);
     await handleChat(post({ message: 'How did that affect today’s workout?', conversation_id: 'conv1', context: { today: TODAY, athlete_data: snapshot(app) } }), deps);
     const next = bodies[2];
-    expect(next.input.slice(0, 4)).toEqual([
+    expect(next.messages.slice(1, 5)).toEqual([
       { role: 'user', content: 'Log basketball for 90 minutes at RPE 8.' },
       { role: 'assistant', content: 'ok' },
       { role: 'assistant', content: r.body.message },

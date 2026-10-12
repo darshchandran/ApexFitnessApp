@@ -108,9 +108,9 @@ describe('authentication', () => {
     const { deps, bodies } = testDeps(() => say('Noted.'));
     await handleChat(post({ conversation_id: 'shared', message: 'ALICE-PRIVATE note' }, token('alice')), deps);
     await handleChat(post({ conversation_id: 'shared', message: 'hello' }, token('bob')), deps);
-    expect(JSON.stringify(bodies[1].input)).not.toContain('ALICE-PRIVATE');
+    expect(JSON.stringify(bodies[1].messages)).not.toContain('ALICE-PRIVATE');
     await handleChat(post({ conversation_id: 'shared', message: 'again' }, token('alice')), deps);
-    expect(JSON.stringify(bodies[2].input)).toContain('ALICE-PRIVATE');
+    expect(JSON.stringify(bodies[2].messages)).toContain('ALICE-PRIVATE');
   });
 });
 
@@ -211,7 +211,7 @@ describe('architecture boundary', () => {
     for (const f of files(join(ROOT, 'src'))) {
       const s = readFileSync(f, 'utf8');
       expect(s).not.toMatch(/from ['"][./]*backend\/|from ['"]openai|require\(['"]openai/);
-      expect(s).not.toMatch(/OPENAI_API_KEY|APEX_AUTH_SECRET|EXPO_PUBLIC_[A-Z_]*(OPENAI|AI_KEY|API_KEY|SECRET|TOKEN)/);
+      expect(s).not.toMatch(/OPENAI_API_KEY|GROQ_API_KEY|api\.groq\.com|APEX_AUTH_SECRET|EXPO_PUBLIC_[A-Z_]*(OPENAI|GROQ|AI_KEY|API_KEY|SECRET|TOKEN)/);
     }
     // the app's AI client and screen never log (tokens, athlete data, messages)
     for (const f of ['src/services/ai.ts', 'src/services/aiSession.ts', 'src/services/useAI.ts', 'src/ui/ai.tsx', 'src/app/ai.tsx']) {
