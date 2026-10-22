@@ -1,0 +1,42 @@
+# Daily production health check for APEX AI (the Supabase Edge Function `apex-ai`).
+# Calls the public /readyz endpoint — no secrets needed — and fails loudly when the backend isn't
+# ready, so GitHub's failed-workflow notification reaches the repo owner.
+#
+# Limits: the request also keeps the free Supabase project from looking idle, but it cannot
+# guarantee availability — Supabase may still pause or suspend a free project, and a paused
+# project has to be restored in the Supabase dashboard. GitHub also disables scheduled workflows
+# in a repository with no activity for 60 days.
+name: APEX AI health
+
+on:
+  schedule:
+    - cron: '17 3 * * *' # daily, 03:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  readyz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      READYZ_URL: https://gbknsjfbtdfvazhhrtsn.supabase.co/functions/v1/apex-ai/readyz
+    steps:
+      - name: GET /readyz
+        run: |
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o body.json -w '%{http_code}' --max-time 30 "$READYZ_URL" || true)
+            echo "attempt $attempt: HTTP ${code:-000} $(cat body.json 2>/dev/null)"
+            if [ "$code" = 200 ] && grep -q '"status":"ready"' body.json; then
+              { echo "### APEX AI is ready"; echo '```'; cat body.json; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 20
+          done
+          body=$(cat body.json 2>/dev/null || echo 'no response')
+          { echo "### APEX AI is NOT ready (HTTP ${code:-000})"; echo '```'; echo "$body"; echo '```';
+            echo 'No response or a host that does not resolve usually means the Supabase project is paused: restore it in the Supabase dashboard.'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=APEX AI not ready::/readyz answered HTTP ${code:-000}: $body"
+          exit 1
