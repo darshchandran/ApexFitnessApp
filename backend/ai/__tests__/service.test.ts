@@ -28,6 +28,7 @@ describe('the Chat Completions tool loop', () => {
     // explanation contracts (audit 6B): quote the engine's recommendation; no catalogue entries as history
     expect(INSTRUCTIONS).toMatch(/quote engine_recommendation[\s\S]*never change, soften or contradict it/);
     expect(INSTRUCTIONS).toMatch(/"no_history"[\s\S]*never present catalogue exercises/);
+    expect(INSTRUCTIONS).toMatch(/PRs, measurements and profile changes are entered by the athlete in the app — never offer to log them yourself/); // seen live: "I can log it"
     expect(b.tools).toHaveLength(14);
     expect(b.messages.slice(1)).toEqual([{ role: 'user', content: 'hello' }]);
     // the test config is OpenAI: nothing stored there, an opaque per-athlete id (Groq takes neither — see below)
