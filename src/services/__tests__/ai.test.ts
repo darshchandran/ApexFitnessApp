@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { memoryStore } from '../../data/store';
 import { createApex } from '../apex';
-import { aiServerUrl, CONNECTION_KEY, CONVERSATION_KEY, createAssistant, MAX_MESSAGE, type ApexMessage, type UserMessage } from '../ai';
+import { aiServerUrl, CONNECTION_KEY, CONVERSATION_KEY, createAssistant, HISTORY_CHARS, HISTORY_TURNS, MAX_MESSAGE, recentTurns, type ApexMessage, type Message, type UserMessage } from '../ai';
 import { memorySecrets, REFRESH_KEY } from '../aiSession';
 
 const NOW = new Date(2026, 9, 7, 18);
@@ -261,6 +261,53 @@ describe('the production AI address', () => {
       expect(aiServerUrl(bad, false)).toBeUndefined();
     }
     expect(aiServerUrl('http://localhost:8787', true)).toBe('http://localhost:8787');
+  });
+});
+
+describe('conversation context (the server keeps none between requests)', () => {
+  it('a follow-up carries the recent conversation; the first question carries none', async () => {
+    const { ai, calls } = await setup([reply('Your load today is low.'), reply('Tomorrow is a rest day.')]);
+    await ai.send('What is my training load?');
+    await ai.send('And tomorrow?');
+    expect(calls[0].body).not.toHaveProperty('history');
+    expect(calls[1].body.history).toEqual([{ role: 'user', content: 'What is my training load?' }, { role: 'assistant', content: 'Your load today is low.' }]);
+  });
+
+  it('stays within the backend limits: newest messages, each cut to its start; failed sends left out; confirmed actions included', () => {
+    const at = NOW.toISOString();
+    const msgs: Message[] = [
+      ...Array.from({ length: 10 }, (_, i): Message => (i % 2
+        ? { id: `a${i}`, role: 'apex', text: `answer ${i} ${'x'.repeat(1500)}`, at, checked: [] }
+        : { id: `u${i}`, role: 'user', text: `question ${i}`, at, status: 'sent' })),
+      { id: 'f', role: 'user', text: 'never got through', at, status: 'failed', retry: true },
+      { id: 'b', role: 'apex', text: 'Confirm it in the app.', at, checked: [], action: { id: 'x', type: 'log_basketball', summary: 'Log basketball — 60 min at RPE 7, today.', arguments: {}, preview: [], expiresAt: at, state: 'executed', note: 'Basketball session logged.' } },
+      { id: 'now', role: 'user', text: 'How does that change today?', at, status: 'sending' },
+      { id: 'later', role: 'apex', text: 'not yet', at, checked: [] },
+    ];
+    const turns = recentTurns(msgs, 'now');
+    expect(turns.length).toBeLessThanOrEqual(HISTORY_TURNS);
+    expect(turns.reduce((n, t) => n + t.content.length, 0)).toBeLessThanOrEqual(HISTORY_CHARS);
+    expect(turns.every((t) => t.content.length <= 1000)).toBe(true);
+    expect(turns.slice(-2)).toEqual([
+      { role: 'assistant', content: 'Confirm it in the app.' },
+      { role: 'assistant', content: 'Basketball session logged. Log basketball — 60 min at RPE 7, today.' },
+    ]);
+    expect(JSON.stringify(turns)).not.toMatch(/never got through|not yet|How does that change/);
+    expect(turns[0].content.startsWith('question') || turns[0].content.startsWith('answer')).toBe(true); // oldest first
+  });
+
+  it('after a restart the restored conversation carries into the next question', async () => {
+    const store = memoryStore({
+      [CONVERSATION_KEY]: JSON.stringify({
+        v: 1, conversationId: 'conv-9', mode: 'default', messages: [
+          { id: 'm1', role: 'user', text: 'My next game is on Saturday.', at: NOW.toISOString(), status: 'sent' },
+          { id: 'm2', role: 'apex', text: 'Noted — Saturday.', at: NOW.toISOString(), checked: [] },
+        ],
+      }),
+    });
+    const { ai, calls } = await setup([reply('Saturday.')], { store });
+    await ai.send('When is my next game?');
+    expect(calls[0].body).toMatchObject({ conversation_id: 'conv-9', history: [{ role: 'user', content: 'My next game is on Saturday.' }, { role: 'assistant', content: 'Noted — Saturday.' }] });
   });
 });
 

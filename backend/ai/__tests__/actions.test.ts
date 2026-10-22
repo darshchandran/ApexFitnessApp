@@ -339,7 +339,7 @@ describe('the device side', () => {
     expect(gym(after).status).toBe('planned');
   });
 
-  it('after confirming, the conversation knows the real outcome and tools see the new session', async () => {
+  it('after confirming, the device’s conversation carries the outcome and tools see the new session', async () => {
     const app = await device();
     let turn = 0;
     const { deps, bodies } = testDeps((b) => {
@@ -349,7 +349,8 @@ describe('the device side', () => {
     const { action } = await propose(deps, app);
     const r = await confirm(deps, action!.id, app);
     app.applyActionChanges(r.body.result.result.changes);
-    await handleChat(post({ message: 'How did that affect today’s workout?', conversation_id: 'conv1', context: { today: TODAY, athlete_data: snapshot(app) } }), deps);
+    const history = [{ role: 'user', content: 'Log basketball for 90 minutes at RPE 8.' }, { role: 'assistant', content: 'ok' }, { role: 'assistant', content: r.body.message }];
+    await handleChat(post({ message: 'How did that affect today’s workout?', conversation_id: 'conv1', history, context: { today: TODAY, athlete_data: snapshot(app) } }), deps);
     const next = bodies[2];
     expect(next.messages.slice(1, 5)).toEqual([
       { role: 'user', content: 'Log basketball for 90 minutes at RPE 8.' },

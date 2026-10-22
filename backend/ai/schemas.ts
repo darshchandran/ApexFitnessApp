@@ -94,6 +94,8 @@ export interface AIMessageRequest {
   message: string;
   /** Which configured model to use: APEX_FAST_MODEL, APEX_AI_MODEL or APEX_DEEP_MODEL. */
   mode?: ModelMode;
+  /** The recent conversation from the device, oldest first (text only). The server keeps none. */
+  history?: { role: 'user' | 'assistant'; content: string }[];
   context?: {
     /** The athlete's local calendar date (APEX dates are local, the server's clock isn't). */
     today?: ISODate;
@@ -110,6 +112,8 @@ export const requestSchema = (limits: AILimits): Schema => ({
     conversation_id: S.text('^[A-Za-z0-9_-]{1,64}$'),
     message: { type: 'string', maxLength: limits.maxMessageChars },
     mode: S.oneOf(['fast', 'default', 'deep']),
+    // the recent conversation, oldest first, from the device (text only; never treated as athlete data)
+    history: S.list(S.obj({ role: S.oneOf(['user', 'assistant']), content: { type: 'string', maxLength: limits.maxMessageChars } }), limits.historyTurns),
     context: {
       type: 'object',
       additionalProperties: false,

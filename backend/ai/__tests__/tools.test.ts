@@ -8,6 +8,7 @@ import { ACTIONS } from '../actions';
 import { check, type Schema } from '../schemas';
 import { runTool, toolDefinitions, TOOLS, type ToolContext } from '../tools';
 import { athleteData, NOW, TODAY, trainedAthlete } from '../test-utils';
+import { completedGym } from '../../../src/test-utils';
 
 const ctxFor = (data: ApexData | null): ToolContext => ({ data: data && deepFreeze(structuredClone(data)), today: TODAY, proposals: [] });
 const run = async (name: string, args: object, data: ApexData) => {
@@ -148,13 +149,44 @@ describe('tools use the existing APEX engine', () => {
     expect((await run('get_athlete_profile', {}, d)).bodyweight).toEqual({ value: '176.4 lb', date: '2026-10-01' });
   });
 
-  it('finds exercises by the athlete’s own wording, and asks when a name is ambiguous', async () => {
-    const d = await athleteData();
-    expect((await run('get_progression', { exercise: 'Chest Supported Rows' }, d)).exercise).toEqual({ id: 'chest-supported-row', name: 'Chest Supported Row' });
-    const vague = await run('get_exercise_history', { exercise: 'curl', limit: null }, d);
-    expect(vague.exercise).toBeNull();
-    expect(vague.matches.length).toBeGreaterThan(1);
-    expect(await run('get_progression', { exercise: 'underwater basket weaving' }, d)).toMatchObject({ exercise: null, matches: [], recommendation: null });
+  it('finds exercises by the athlete’s own wording; only what they logged counts as their history', async () => {
+    const fresh = await athleteData();
+    // regression (audit 6B): an athlete with no history and a vague name got catalogue entries back,
+    // which the model presented as "variations in your history" — now an explicit no-history result
+    for (const tool of ['get_exercise_history', 'get_progression', 'get_prs']) {
+      const args = tool === 'get_progression' ? { exercise: 'bench press' } : { exercise: 'bench press', limit: null };
+      expect(await run(tool, args, fresh)).toMatchObject({ exercise: null, matches: [], lookup: 'no_history' });
+    }
+    expect(await run('get_prs', { exercise: 'bench press', limit: null }, fresh)).toMatchObject({ total: 0, records: [] });
+    expect(await run('get_exercise_history', { exercise: 'bench press', limit: null }, fresh)).toMatchObject({ total_sessions: 0, sessions: [], best_set: null });
+    // a name that is clearly one exercise is resolved — and still says nothing is logged
+    expect(await run('get_progression', { exercise: 'Chest Supported Rows' }, fresh)).toMatchObject({ exercise: { id: 'chest-supported-row', name: 'Chest Supported Row' }, lookup: 'no_history' });
+    expect(await run('get_progression', { exercise: 'underwater basket weaving' }, fresh)).toMatchObject({ exercise: null, matches: [], lookup: 'not_found', recommendation: null });
+    // with history: a vague name resolves among what they logged, and is ambiguous only between those
+    const trained = await athleteData({ instances: [completedGym('legs', '2026-09-30', { 'leg-press': [[180, 12, 2]], 'seated-leg-curl': [[40, 12, 2]], 'smith-squat': [[100, 8, 2]] })] });
+    expect(await run('get_exercise_history', { exercise: 'squat', limit: null }, trained)).toMatchObject({ exercise: { id: 'smith-squat' }, lookup: 'logged', total_sessions: 1 });
+    const leg = await run('get_exercise_history', { exercise: 'leg', limit: null }, trained);
+    expect(leg).toMatchObject({ exercise: null, lookup: 'ambiguous' });
+    expect(leg.matches.map((m: { id: string }) => m.id).sort()).toEqual(['leg-press', 'seated-leg-curl']); // never Leg Extension: not logged
+  });
+
+  it('an adapted session states the engine’s recommendation and its options — quoted, not inferred (audit 6B)', async () => {
+    const hard = await run('get_current_adaptation', {}, await trainedAthlete());
+    const gym = hard.sessions.find((s: { session: string }) => s.session === 'gym');
+    expect(gym.outcome).not.toBe('normal');
+    const expected = gym.outcome === 'deferred' ? `Take a recovery day: APEX advises against ${gym.template} today.`
+      : gym.outcome === 'alternative' && gym.alternative ? `Train ${gym.alternative} instead of ${gym.template} today.`
+        : `Train ${gym.template} with APEX’s adjusted prescription (${gym.volume_change_pct}% volume).`;
+    expect(gym.engine_recommendation).toBe(expected);
+    expect(gym.options).toEqual([
+      `adapt — ${gym.template} with APEX’s adjusted prescription (${gym.volume_change_pct}% volume)`,
+      ...(gym.alternative ? [`alternative — ${gym.alternative} instead of ${gym.template}`] : []),
+      'recovery_day — take today as a recovery day (nothing is deleted)',
+      `keep — the original ${gym.template} plan (the athlete chooses this in the app)`,
+    ]);
+    // a day with nothing to adapt says so plainly
+    const calm = (await run('get_current_adaptation', {}, await athleteData())).sessions.find((s: { session: string }) => s.session === 'gym');
+    expect(calm).toMatchObject({ outcome: 'normal', engine_recommendation: `Train ${calm.template} as planned.`, options: ['recovery_day — take today as a recovery day (nothing is deleted)'] });
   });
 
   it('the profile is reported as athlete-provided, without the name or question bookkeeping', async () => {

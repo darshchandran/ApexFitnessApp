@@ -16,7 +16,7 @@ import { DEFAULT_LIMITS, type AIConfig, type AILimits, type Environment, type Se
 import { snapshotSource, type AthleteDataSource } from './data';
 import { AIError, check, confirmSchema, ERRORS, refreshSchema, requestSchema, S, type AIErrorCode, type AIMessageRequest, type Schema } from './schemas';
 import { authenticate, consoleLogger, type AILogEvent, type AILogger, type AuthUser } from './security';
-import { AIService, ConversationStore, type ChatClient } from './service';
+import { AIService, type ChatClient } from './service';
 import { ActionStore, argumentsHash, clientAction, RateLimits, type StoredAction } from './store';
 
 export interface ChatDeps {
@@ -39,7 +39,7 @@ export interface ChatDeps {
 
 export function createDeps(config: ServerConfig, db: Db, makeClient: (ai: AIConfig) => ChatClient, logger: AILogger = consoleLogger): ChatDeps {
   const actions = new ActionStore(db);
-  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
+  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, actions });
   if (!ai) logger({ event: 'ai.config', problem: 'no AI provider key / APEX_AI_MODEL set: chat is unavailable (development)' });
   return {
     env: config.env, secret: config.authSecret, ai, db, actions, rate: new RateLimits(db), registration: config.registration,
@@ -206,6 +206,9 @@ export async function handleChat(req: Request, deps: ChatDeps, ctx: Ctx = { rid:
     const r = gate.body as AIMessageRequest;
     const message = r.message.trim();
     if (!message) return fail('invalid_request', { detail: '$.message: empty' });
+    const history = r.history ?? [];
+    if (history.some((t) => !t.content.trim())) return fail('invalid_request', { detail: '$.history: empty message' });
+    if (history.reduce((n, t) => n + t.content.length, 0) > deps.limits.maxHistoryChars) return fail('invalid_request', { detail: '$.history: too long' });
     const today = r.context?.today ?? utcDate(now);
     if (!plausibleToday(today, now)) return fail('invalid_request', { detail: '$.context.today: not today' });
 
@@ -215,7 +218,7 @@ export async function handleChat(req: Request, deps: ChatDeps, ctx: Ctx = { rid:
 
     const mode = r.mode ?? 'default';
     model = deps.ai.model(mode);
-    const { rounds, ...out } = await deps.ai.respond({ userId: gate.user.userId, conversationId: r.conversation_id ?? randomUUID(), message, mode, data, today, log: ctx.log });
+    const { rounds, ...out } = await deps.ai.respond({ userId: gate.user.userId, conversationId: r.conversation_id ?? randomUUID(), message, history, mode, data, today, log: ctx.log });
     stats = { rounds, tools: out.tools_used.length };
     if (out.action) ctx.log({ event: 'ai.action', op: 'propose', type: out.action.type, ok: true });
     return reply(200, out);
@@ -310,12 +313,8 @@ export async function handleAction(req: Request, deps: ChatDeps, id: string, op:
     const claim = await deps.actions.claim(id, user);
     if (!claim) return outcome(await deps.actions.get(id, user));
     const result = await execute(claim.action, data, body.context.today);
-    const recorded = await deps.actions.finish(claim, result);
-    if (recorded.result?.timestamp === result.timestamp) {
-      // the conversation learns the real outcome (text only), so "how did that affect today?" can follow
-      deps.ai?.conversations.add(user, recorded.conversationId, [{ role: 'assistant', content: resultMessage(recorded, result) }]);
-    }
-    return outcome(recorded);
+    // the device adds the outcome to its conversation, so "how did that affect today?" can follow
+    return outcome(await deps.actions.finish(claim, result));
   } catch (e) {
     const down = unavailable(e);
     ctx.log({ event: 'ai.error', where: op, category: down ? 'database_unavailable' : 'internal' });

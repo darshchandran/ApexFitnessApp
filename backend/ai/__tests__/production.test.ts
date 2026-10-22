@@ -292,6 +292,44 @@ describe('persistent actions and exactly-once', () => {
     expect((await confirm(deps, late.id, app)).json.error.code).toBe('action_expired');
   });
 
+  it('retention: 24 h for retries and replays, then deleted — an expired action is refused, then purged', async () => {
+    const app = await device();
+    const clock = testClock();
+    const actions = testActions({ clock: clock.now });
+    expect(actions.keepMs).toBe(24 * 3_600_000);
+    const { deps } = testDeps(proposer, { actions });
+    const done = await propose(deps, app);
+    const first = await confirm(deps, done.id, app);
+    expect(first.status).toBe(200);
+    const left = await propose(deps, app); // never confirmed
+    clock.advance(5 * 60_000);
+    expect((await confirm(deps, left.id, app)).json.error.code).toBe('action_expired');
+    clock.advance(24 * 3_600_000 - 6 * 60_000); // just inside 24 h: a retry still replays the one result
+    await actions.purge();
+    expect((await confirm(deps, done.id, app)).json.result).toEqual(first.json.result);
+    const live = await propose(deps, app); // proposing purges too — and a new action is never caught by it
+    clock.advance(2 * 60_000); // done and left are now older than 24 h
+    await actions.purge();
+    for (const id of [done.id, left.id]) {
+      expect(await actions.get(id, 'athlete_1')).toBeUndefined();
+      expect((await confirm(deps, id, app)).json.error.code).toBe('not_found');
+    }
+    expect((await actions.get(live.id, 'athlete_1'))?.status).toBe('pending');
+    expect((await confirm(deps, live.id, app)).status).toBe(200);
+  });
+
+  it('retention never undercuts a live action: below expiry + lease + settle it is raised', async () => {
+    const app = await device();
+    const clock = testClock();
+    const actions = testActions({ clock: clock.now, keepMs: 1000 });
+    expect(actions.keepMs).toBe(5 * 60_000 + 60_000 + 10_000);
+    const { deps } = testDeps(proposer, { actions });
+    const a = await propose(deps, app);
+    clock.advance(5 * 60_000 - 1);
+    await actions.purge();
+    expect((await confirm(deps, a.id, app)).status).toBe(200); // still confirmable right up to expiry
+  });
+
   it('a server that died mid-execution: the confirm is taken over after the lease, still once', async () => {
     const app = await device();
     const clock = testClock();

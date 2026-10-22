@@ -119,8 +119,8 @@ async function post(base: string, path: string, body: unknown, user: string | nu
 }
 
 type Device = Awaited<ReturnType<typeof device>>;
-const chat = (base: string, app: Device, message: string, user = 'athlete_1', conversation_id = 'conv-1') =>
-  post(base, '/ai/chat', { message, conversation_id, context: { today: TODAY, athlete_data: snapshot(app) } }, user);
+const chat = (base: string, app: Device, message: string, user = 'athlete_1', conversation_id = 'conv-1', history?: { role: string; content: string }[]) =>
+  post(base, '/ai/chat', { message, conversation_id, ...(history && { history }), context: { today: TODAY, athlete_data: snapshot(app) } }, user);
 const confirm = (base: string, id: string, app: Device, extra: { user?: string; arguments?: object } = {}) =>
   post(base, `/ai/actions/${id}/confirm`, { context: { today: TODAY, athlete_data: snapshot(app) }, ...(extra.arguments && { arguments: extra.arguments }) }, extra.user ?? 'athlete_1');
 const cancel = (base: string, id: string, user = 'athlete_1') => post(base, `/ai/actions/${id}/cancel`, {}, user);
@@ -180,8 +180,9 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
     expect(after.instances.map((i) => i.id)).toEqual(before.instances.map((i) => i.id));
     expect(todayOverview(after, TODAY).load.basketball).toBeGreaterThan(0);
 
-    // 4. the next turn: the conversation knows the outcome; tools retrieve the new session from the device's data
-    const followUp = await chat(apex.url, app, 'How did that affect today’s workout?');
+    // 4. the next turn: the device sends the conversation (with the outcome); tools read the new session from its data
+    const history = [{ role: 'user', content: 'Log basketball for 90 minutes at RPE 8.' }, { role: 'assistant', content: proposed.json.message }, { role: 'assistant', content: confirmed.json.message }];
+    const followUp = await chat(apex.url, app, 'How did that affect today’s workout?', 'athlete_1', 'conv-1', history);
     expect(followUp.status).toBe(200);
     expect(followUp.json.message).toBe(`Logged today: Basketball 90 min @ RPE 8. ${gym(after).decision.headline}`);
     expect(seen[2].body.messages.slice(1, 5)).toEqual([

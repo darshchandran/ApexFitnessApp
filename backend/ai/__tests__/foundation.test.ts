@@ -104,13 +104,15 @@ describe('authentication', () => {
     expect(toolOutputs(bodies[3])[1].goal).toBe('muscle');
   });
 
-  it('a conversation id cannot be used to read another athlete’s conversation', async () => {
+  it('the server keeps no conversation: a conversation id carries nothing between requests or athletes', async () => {
     const { deps, bodies } = testDeps(() => say('Noted.'));
     await handleChat(post({ conversation_id: 'shared', message: 'ALICE-PRIVATE note' }, token('alice')), deps);
     await handleChat(post({ conversation_id: 'shared', message: 'hello' }, token('bob')), deps);
-    expect(JSON.stringify(bodies[1].messages)).not.toContain('ALICE-PRIVATE');
     await handleChat(post({ conversation_id: 'shared', message: 'again' }, token('alice')), deps);
-    expect(JSON.stringify(bodies[2].messages)).toContain('ALICE-PRIVATE');
+    expect(JSON.stringify(bodies.slice(1))).not.toContain('ALICE-PRIVATE'); // nothing remembered, for anyone
+    // continuity is only what the caller's own device sends
+    await handleChat(post({ conversation_id: 'shared', message: 'and?', history: [{ role: 'user', content: 'ALICE-PRIVATE note' }, { role: 'assistant', content: 'Noted.' }] }, token('alice')), deps);
+    expect(bodies[3].messages.slice(1)).toEqual([{ role: 'user', content: 'ALICE-PRIVATE note' }, { role: 'assistant', content: 'Noted.' }, { role: 'user', content: 'and?' }]);
   });
 });
 

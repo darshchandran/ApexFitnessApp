@@ -96,7 +96,7 @@ supabase/migrations/    the schema (RLS on, closed to Supabase's anon/authentica
 
 **Production checklist:** see [DEPLOY.md](DEPLOY.md).
 
-Conversation memory (a few recent text turns) is kept in each server's memory on purpose — no conversation text is stored; with several instances a conversation may lose earlier context, never data.
+Conversation context comes from the device: each question carries the recent conversation (≤ 8 messages, ≤ 4,000 characters, text only) because the server keeps none between requests; no conversation text is stored server-side. A daily GitHub Actions check calls `/readyz` (see DEPLOY.md §7).
 
 ## Not in this phase
 

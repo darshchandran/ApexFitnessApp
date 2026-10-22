@@ -20,34 +20,12 @@ export interface Turn {
   content: string;
 }
 
-/**
- * Recent turns per (user, conversation): text only — never tool output, never athlete facts.
- * Structured athlete state lives in the app's profile; nothing said in chat is written there.
- * ponytail: in-process memory with a TTL — a database table if conversations must survive restarts.
- */
-export class ConversationStore {
-  private map = new Map<string, { at: number; turns: Turn[] }>();
-  constructor(private maxTurns = 8, private ttlMs = 2 * 3_600_000, private maxConversations = 5000) {}
-  private key = (userId: string, id: string) => `${userId}\u0000${id}`;
-
-  get(userId: string, id: string, now = Date.now()): Turn[] {
-    const e = this.map.get(this.key(userId, id));
-    return e && now - e.at <= this.ttlMs ? e.turns : [];
-  }
-
-  add(userId: string, id: string, turns: Turn[], now = Date.now()) {
-    const k = this.key(userId, id);
-    const prev = this.get(userId, id, now);
-    this.map.delete(k);
-    this.map.set(k, { at: now, turns: [...prev, ...turns].slice(-this.maxTurns) });
-    if (this.map.size > this.maxConversations) this.map.delete(this.map.keys().next().value!);
-  }
-}
-
 export interface ChatInput {
   userId: string;
   conversationId: string;
   message: string;
+  /** The recent conversation from the device, oldest first — text only, already validated. */
+  history?: Turn[];
   mode: ModelMode;
   data: Readonly<ApexData> | null;
   today: ISODate;
@@ -107,12 +85,10 @@ function classify(e: unknown): AIError {
 
 export class AIService {
   private log: AILogger;
-  readonly conversations: ConversationStore;
   readonly actions: ActionStore;
 
-  constructor(private deps: { client: ChatClient; config: AIConfig; actions: ActionStore; logger?: AILogger; conversations?: ConversationStore; now?: () => number }) {
+  constructor(private deps: { client: ChatClient; config: AIConfig; actions: ActionStore; logger?: AILogger; now?: () => number }) {
     this.log = deps.logger ?? consoleLogger;
-    this.conversations = deps.conversations ?? new ConversationStore(deps.config.limits.historyTurns);
     this.actions = deps.actions;
   }
 
@@ -127,7 +103,8 @@ export class AIService {
     const model = this.model(chat.mode);
     const messages: ChatCompletionMessageParam[] = [
       { role: 'system', content: INSTRUCTIONS },
-      ...this.conversations.get(chat.userId, chat.conversationId, now()).map((t) => ({ role: t.role, content: t.content })),
+      // continuity comes from the device's own conversation (the server keeps none between requests)
+      ...(chat.history ?? []).map((t) => ({ role: t.role, content: t.content })),
       { role: 'user', content: chat.message },
     ];
     const ctx: ToolContext = { data: chat.data, today: chat.today, proposals: [] };
@@ -143,7 +120,6 @@ export class AIService {
         if (!calls.length) {
           const text = (choice.message.content ?? choice.message.refusal ?? '').trim();
           if (!text) throw new AIError('model_error', choice.finish_reason === 'length' ? 'incomplete_output' : 'empty_output');
-          this.conversations.add(chat.userId, chat.conversationId, [{ role: 'user', content: chat.message }, { role: 'assistant', content: text }], now());
           // only a proposal from a turn that finished is kept — it waits for the athlete, bound to them
           const draft = ctx.proposals.at(-1);
           const action = draft ? await this.actions.create(draft, chat.userId, chat.conversationId) : undefined;

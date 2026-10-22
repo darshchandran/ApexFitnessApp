@@ -15,6 +15,10 @@ const MAX_STORED = 40;
 const MAX_TEXT = 4000; // per stored message
 const MAX_REPLY = 20_000; // a reply this long is still shown in full until it is stored
 const CHAT_TIMEOUT = 45_000;
+/** What a question may carry of the conversation (backend/ai/config.ts → historyTurns, maxHistoryChars). */
+export const HISTORY_TURNS = 8;
+export const HISTORY_CHARS = 4000;
+const HISTORY_ITEM = 1000; // each earlier message, cut to its start (answers lead with the point)
 const ACTION_TIMEOUT = 30_000;
 export const CONVERSATION_KEY = 'apex:v1:ai-conversation';
 export const CONNECTION_KEY = 'apex:v1:ai-connection';
@@ -104,6 +108,36 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 const str = (v: unknown, max = MAX_TEXT): v is string => typeof v === 'string' && v.length <= max;
 let seq = 0;
 const uid = () => `m${Date.now().toString(36)}${(seq++).toString(36)}`;
+
+export type Turn = { role: 'user' | 'assistant'; content: string };
+
+/**
+ * The conversation before `messageId`, newest messages that fit the backend's limits, oldest
+ * first. The server keeps no conversation between requests (each may run on a fresh instance), so
+ * follow-ups need this. Confirmed actions are included as what happened; failed sends are not.
+ */
+export function recentTurns(messages: Message[], messageId: string): Turn[] {
+  const turns: Turn[] = [];
+  for (const m of messages) {
+    if (m.id === messageId) break;
+    if (m.role === 'user') {
+      if (m.status === 'sent') turns.push({ role: 'user', content: m.text });
+      continue;
+    }
+    turns.push({ role: 'assistant', content: m.text });
+    if (m.action?.state === 'executed') turns.push({ role: 'assistant', content: `${m.action.note ?? 'Done.'} ${m.action.summary}` });
+  }
+  const out: Turn[] = [];
+  let chars = 0;
+  for (const t of turns.reverse()) {
+    const content = t.content.trim().slice(0, HISTORY_ITEM);
+    if (!content) continue;
+    if (out.length === HISTORY_TURNS || chars + content.length > HISTORY_CHARS) break;
+    out.unshift({ role: t.role, content });
+    chars += content.length;
+  }
+  return out;
+}
 
 /** A server-written, athlete-facing reason (only for action failures) — never a raw error. */
 const reason = (j: unknown) => {
@@ -287,8 +321,9 @@ export function createAssistant(deps: {
     const msg = state.messages.find((m) => m.id === userId);
     if (!msg) return false;
     try {
+      const history = recentTurns(state.messages, userId);
       const { status, json } = await call('/ai/chat', {
-        message: msg.text, mode: state.mode, ...(state.conversationId && { conversation_id: state.conversationId }), context: context(),
+        message: msg.text, mode: state.mode, ...(state.conversationId && { conversation_id: state.conversationId }), ...(history.length && { history }), context: context(),
       }, deps.timeouts?.chat ?? CHAT_TIMEOUT);
       if (status !== 200) throw new RequestFailed('http', status, json);
       const r = readChat(json);

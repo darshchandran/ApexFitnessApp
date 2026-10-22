@@ -177,8 +177,17 @@ passwords, message text, profile data or action arguments.
 ## 7. Known limitations
 
 - Install-level identity, not accounts (see §5). Web sign-in lasts for the browser session.
-- Conversation context (a few recent turns) is kept in each server's memory by design — with
-  several instances a conversation can lose earlier context, never data.
+- Conversation context: the server keeps none (each Edge Function request may run on a fresh
+  instance). The app sends the recent conversation with every question — at most 8 messages and
+  4,000 characters, text only — and the server validates it and uses it only to follow the
+  conversation, never as athlete data. Builds before this change send no history.
+- AI action records (proposals and their results, for retries and replays) are kept 24 hours, never
+  less than an action's expiry + confirm lease; old rows are deleted whenever an action is proposed.
+- Availability: `.github/workflows/apex-ai-health.yml` calls `/readyz` daily (and on demand) and
+  fails loudly — GitHub emails the repo owner — when the backend isn't ready. It keeps the free
+  project from looking idle but cannot guarantee it: Supabase can still pause or suspend a free
+  project (restore it in the dashboard), and GitHub disables scheduled workflows after 60 days
+  without repository activity.
 - Rate limits use fixed windows (a burst at a window boundary can briefly reach twice the limit).
 
 ## 8. Model provider: Groq

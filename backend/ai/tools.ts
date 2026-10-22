@@ -64,8 +64,18 @@ const EXERCISE_QUERY = S.text('^[^\\n]{1,80}$', 'The exercise as the athlete nam
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 /** An exercise by id or name — the athlete's own template wording or the catalog's. Ambiguous → candidates. */
-function findExercise(d: ApexData, q: string): { exercise: { id: string; name: string } | null; matches: { id: string; name: string }[] } {
-  if (hasGymExercise(q)) return { exercise: { id: q, name: gymExercise(q).name }, matches: [] };
+/** How a name resolved: logged by this athlete, known but never logged, several logged candidates, or unknown. */
+const LOOKUP = S.oneOf(['logged', 'no_history', 'ambiguous', 'not_found']);
+type Lookup = 'logged' | 'no_history' | 'ambiguous' | 'not_found';
+
+/**
+ * The athlete's wording → one exercise. Only exercises this athlete has logged count as theirs: an
+ * ambiguous name resolves among those, and a name that only fits catalogue or template exercises is
+ * "no_history" — candidates they never trained are never offered as their history.
+ */
+function findExercise(d: ApexData, q: string): { exercise: { id: string; name: string } | null; matches: { id: string; name: string }[]; lookup: Lookup } {
+  const logged = (id: string) => exerciseHistory(d.instances, id).length > 0;
+  if (hasGymExercise(q)) return { exercise: { id: q, name: gymExercise(q).name }, matches: [], lookup: logged(q) ? 'logged' : 'no_history' };
   const n = norm(q);
   const named = [...d.templates.flatMap((t) => t.exercises.map((e) => ({ id: e.exerciseId, name: e.name }))), ...GYM_EXERCISES]
     .filter((x) => hasGymExercise(x.id));
@@ -75,7 +85,11 @@ function findExercise(d: ApexData, q: string): { exercise: { id: string; name: s
   const exact = pick((x) => x === n);
   // every word the athlete used appears in the name ("smith squat" → Smith Machine Squat), or the name is inside the query
   const hits = exact.length ? exact : words.length ? pick((x) => words.every((w) => x.includes(w)) || n.includes(x)) : [];
-  return hits.length === 1 ? { exercise: hits[0], matches: [] } : { exercise: null, matches: hits.slice(0, 8) };
+  if (!hits.length) return { exercise: null, matches: [], lookup: 'not_found' };
+  const mine = hits.filter((h) => logged(h.id));
+  if (mine.length === 1) return { exercise: mine[0], matches: [], lookup: 'logged' };
+  if (mine.length > 1) return { exercise: null, matches: mine.slice(0, 8), lookup: 'ambiguous' };
+  return { exercise: hits.length === 1 ? hits[0] : null, matches: [], lookup: 'no_history' };
 }
 
 const SESSION = S.obj({
@@ -125,7 +139,29 @@ const DECISION = S.obj({
   recent_sessions: S.list(S.str()),
   schedule_context: S.list(S.str()),
   athlete_kept_plan: S.bool(),
+  engine_recommendation: S.str(),
+  options: S.list(S.str()),
 });
+
+/**
+ * The engine's outcome as a plain recommendation plus the options the athlete has — wording only;
+ * the decision itself is the engine's (so the model quotes it rather than inferring it).
+ */
+function engineAdvice(template: string, outcome: SessionInstance['decision']['outcome'], alternative: string | null, volumePct: number) {
+  const adjusted = `${template} with APEX’s adjusted prescription (${volumePct}% volume)`;
+  const engine_recommendation =
+    outcome === 'normal' ? `Train ${template} as planned.`
+      : outcome === 'deferred' ? `Take a recovery day: APEX advises against ${template} today.`
+        : outcome === 'alternative' && alternative ? `Train ${alternative} instead of ${template} today.`
+          : `Train ${adjusted}.`;
+  const options = outcome === 'normal' ? ['recovery_day — take today as a recovery day (nothing is deleted)'] : [
+    `adapt — ${adjusted}`,
+    ...(alternative ? [`alternative — ${alternative} instead of ${template}`] : []),
+    'recovery_day — take today as a recovery day (nothing is deleted)',
+    `keep — the original ${template} plan (the athlete chooses this in the app)`,
+  ];
+  return { engine_recommendation, options };
+}
 
 function decisionView(d: ApexData, i: SessionInstance, u: Units) {
   const x = i.decision;
@@ -149,6 +185,7 @@ function decisionView(d: ApexData, i: SessionInstance, u: Units) {
     recent_sessions: x.inputs?.recent ?? [],
     schedule_context: x.inputs?.context ?? [],
     athlete_kept_plan: i.plan === 'kept',
+    ...engineAdvice(i.templateName, x.outcome, x.alternativeTemplateId ? templateName(d, x.alternativeTemplateId) : null, round((x.volumeFactor - 1) * 100)),
   };
 }
 
@@ -386,10 +423,10 @@ const READ_TOOLS: ApexTool[] = [
   {
     name: 'get_exercise_history',
     access: 'read',
-    description: 'One lift’s logged sessions (newest first, all sets), best set and best estimated 1RM. If the name is ambiguous, returns candidate exercises to ask about.',
+    description: 'One lift’s logged sessions (newest first, all sets), best set and best estimated 1RM. lookup says whether the athlete has logged it ("no_history": nothing logged) or which of their logged exercises to ask about ("ambiguous").',
     input: S.obj({ exercise: EXERCISE_QUERY, limit: S.orNull(S.int(1, 20, 'Sessions to return. Default 6.')) }),
     output: S.obj({
-      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE), total_sessions: S.num(),
+      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE), lookup: LOOKUP, total_sessions: S.num(),
       sessions: S.list(S.obj({ date: S.str(), template: S.str(), sets: S.list(S.str()), notes: S.orNull(S.str()) })),
       best_set: S.orNull(S.str()), best_e1rm: S.orNull(S.str()),
     }),
@@ -415,7 +452,7 @@ const READ_TOOLS: ApexTool[] = [
     description: 'APEX’s next recommendation for a lift (increase, add reps, hold, maintain, decrease or establish) with its reason, based on the last session and today’s fatigue if the lift is on today’s plan.',
     input: S.obj({ exercise: EXERCISE_QUERY }),
     output: S.obj({
-      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE),
+      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE), lookup: LOOKUP,
       recommendation: S.orNull(S.obj({ action: S.str(), weight: S.orNull(S.str()), reps: S.num(), reason: S.str() })),
       based_on: S.orNull(S.obj({ date: S.str(), sets: S.list(S.str()) })),
       on_today_plan: S.bool(), today_prescription: S.orNull(S.str()),
@@ -447,11 +484,11 @@ const READ_TOOLS: ApexTool[] = [
       limit: S.orNull(S.int(1, 50, 'Records to return. Default 10.')),
     }),
     output: S.obj({
-      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE), total: S.num(),
+      exercise: S.orNull(EXERCISE), matches: S.list(EXERCISE), lookup: S.orNull(LOOKUP), total: S.num(),
       records: S.list(S.obj({ date: S.str(), exercise: S.str(), kind: S.str(), detail: S.str() })),
     }),
     run(d, a) {
-      const f = a.exercise ? findExercise(d, a.exercise as string) : { exercise: null, matches: [] };
+      const f = a.exercise ? findExercise(d, a.exercise as string) : { exercise: null, matches: [], lookup: null };
       if (a.exercise && !f.exercise) return { ...f, total: 0, records: [] };
       const u = unitsOf(d);
       const recs = d.records.filter((r) => !f.exercise || r.exerciseId === f.exercise.id).sort((x, y) => y.date.localeCompare(x.date));

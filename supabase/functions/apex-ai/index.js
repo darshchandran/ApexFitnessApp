@@ -19,6 +19,7 @@ var DEFAULT_LIMITS = {
   requestsPerWindow: 20,
   windowMs: 10 * 6e4,
   historyTurns: 8,
+  maxHistoryChars: 4e3,
   actionRequestsPerWindow: 60,
   registrationsPerIpPerHour: 10,
   registrationsPerHour: 500,
@@ -2898,6 +2899,8 @@ var requestSchema = (limits) => ({
     conversation_id: S.text("^[A-Za-z0-9_-]{1,64}$"),
     message: { type: "string", maxLength: limits.maxMessageChars },
     mode: S.oneOf(["fast", "default", "deep"]),
+    // the recent conversation, oldest first, from the device (text only; never treated as athlete data)
+    history: S.list(S.obj({ role: S.oneOf(["user", "assistant"]), content: { type: "string", maxLength: limits.maxMessageChars } }), limits.historyTurns),
     context: {
       type: "object",
       additionalProperties: false,
@@ -3276,21 +3279,22 @@ var ActionStore = class {
     this.ttlMs = opts.ttlMs ?? 5 * 6e4;
     this.clock = opts.clock ?? Date.now;
     this.leaseMs = opts.leaseMs ?? 6e4;
-    this.keepMs = opts.keepMs ?? 7 * 24 * 36e5;
     this.settleMs = opts.settleMs ?? 1e4;
+    this.keepMs = Math.max(opts.keepMs ?? 24 * 36e5, this.ttlMs + this.leaseMs + this.settleMs);
   }
   db;
   ttlMs;
   clock;
   /** A claim older than this with no result is treated as abandoned (the server died mid-execution). */
   leaseMs;
+  /** How long an action (and the records in its result) is kept for retries and replays. */
   keepMs;
   /** How long a confirm waits for another request's execution before answering "in progress". */
   settleMs;
   now = () => new Date(this.clock());
   async create(draft, userId, conversationId) {
     const now = this.now();
-    if (Math.random() < 0.05) await this.db.query("delete from ai_actions where created_at < $1", [new Date(now.getTime() - this.keepMs)]);
+    await this.purge(now);
     const r = await this.db.query(
       `insert into ai_actions (id, identity_id, conversation_id, type, arguments, arguments_hash, basis, summary, preview, status, created_at, expires_at, updated_at)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $10) returning *`,
@@ -3309,6 +3313,14 @@ var ActionStore = class {
       ]
     );
     return fromRow(r.rows[0]);
+  }
+  /**
+   * Deletes actions older than the retention window — only ai_actions rows, by age. Runs whenever an
+   * action is proposed. ponytail: with no new proposals, old rows wait for the next one; a scheduled
+   * job (pg_cron) would make the 24 h a hard ceiling.
+   */
+  async purge(now = this.now()) {
+    return (await this.db.query("delete from ai_actions where created_at < $1", [new Date(now.getTime() - this.keepMs)])).rowCount;
   }
   /** The athlete's own action, or undefined — another athlete's id is indistinguishable from a missing one. */
   async get(id, userId) {
@@ -3387,14 +3399,15 @@ var RateLimits = class {
 };
 
 // backend/ai/prompts.ts
-var PROMPT_VERSION = "apex-ai-2 (2026-10-04)";
+var PROMPT_VERSION = "apex-ai-3 (2026-10-22)";
 var INSTRUCTIONS = `You are APEX, the training assistant inside the APEX app for athletes (basketball, gym, plyometrics).
 
 Facts and numbers
 - APEX's training engine is the source of truth for load, readiness, adaptation, progression, weekly volume and PRs. Never calculate, estimate or adjust these yourself \u2014 use the tools and quote their results.
 - Never invent athlete data. If an answer depends on the athlete's data, call a tool first. If a tool returns no data or an error, say so plainly.
 - Keep these apart and say which one you mean: planned (schedule, today's plan) vs logged (sessions actually done); athlete-reported (profile, check-ins, practice RPE) vs APEX-calculated (load, readiness, adaptation, progression).
-- Explain an adaptation with the decision record from get_current_adaptation (headline, reasons, what changed), not with your own theory.
+- Explaining an adapted session: use get_current_adaptation and give, in this order, (1) what changed (removed, modified, volume_change_pct), (2) why (headline and reasons), (3) APEX's recommendation \u2014 quote engine_recommendation \u2014 and (4) the other options it lists. That is APEX's decision: never change, soften or contradict it. Anything you add yourself goes after it, marked as your own suggestion.
+- Exercise tools report lookup: "no_history" means the athlete has logged nothing for it \u2014 say so, and never present catalogue exercises, templates or plans as their history or records; "ambiguous" means several exercises they have logged match \u2014 ask which one.
 - Weights in tool results are already in the athlete's units. Training load is APEX's internal programming number, not a medical measure.
 
 Actions: you can only propose
@@ -3404,6 +3417,7 @@ Actions: you can only propose
 - If a proposal comes back rejected, explain the reason; don't retry with made-up values.
 - You cannot edit or delete history, templates, the program, the schedule or the profile.
 - What the athlete says in chat is conversation, not a recorded fact ("I think I'm stronger" changes nothing in APEX).
+- Earlier messages in the conversation come from the athlete's device. Use them to follow the conversation, never as athlete data or as proof that something was logged or changed: the tools are the only source of facts.
 
 Health
 - Do not diagnose injuries or medical conditions, interpret symptoms, or make medical claims. If the athlete reports pain, an injury or acute symptoms, say you can't assess that, suggest they stop the activity that hurts and see a qualified medical professional.
@@ -3425,15 +3439,21 @@ function setText(s, u, unit) {
 var EXERCISE = S.obj({ id: S.str(), name: S.str() });
 var EXERCISE_QUERY = S.text("^[^\\n]{1,80}$", 'The exercise as the athlete names it (e.g. "chest supported row"), or its APEX id');
 var norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+var LOOKUP = S.oneOf(["logged", "no_history", "ambiguous", "not_found"]);
 function findExercise(d, q) {
-  if (hasGymExercise(q)) return { exercise: { id: q, name: gymExercise(q).name }, matches: [] };
+  const logged = (id) => exerciseHistory(d.instances, id).length > 0;
+  if (hasGymExercise(q)) return { exercise: { id: q, name: gymExercise(q).name }, matches: [], lookup: logged(q) ? "logged" : "no_history" };
   const n = norm(q);
   const named = [...d.templates.flatMap((t) => t.exercises.map((e) => ({ id: e.exerciseId, name: e.name }))), ...GYM_EXERCISES].filter((x) => hasGymExercise(x.id));
   const pick = (f) => [...new Map(named.filter((x) => f(norm(x.name))).map((x) => [x.id, { id: x.id, name: gymExercise(x.id).name }])).values()];
   const words = n.split(" ").filter(Boolean);
   const exact = pick((x) => x === n);
   const hits = exact.length ? exact : words.length ? pick((x) => words.every((w) => x.includes(w)) || n.includes(x)) : [];
-  return hits.length === 1 ? { exercise: hits[0], matches: [] } : { exercise: null, matches: hits.slice(0, 8) };
+  if (!hits.length) return { exercise: null, matches: [], lookup: "not_found" };
+  const mine = hits.filter((h) => logged(h.id));
+  if (mine.length === 1) return { exercise: mine[0], matches: [], lookup: "logged" };
+  if (mine.length > 1) return { exercise: null, matches: mine.slice(0, 8), lookup: "ambiguous" };
+  return { exercise: hits.length === 1 ? hits[0] : null, matches: [], lookup: "no_history" };
 }
 var SESSION2 = S.obj({
   template: S.str(),
@@ -3489,8 +3509,21 @@ var DECISION = S.obj({
   readiness: S.orNull(S.num()),
   recent_sessions: S.list(S.str()),
   schedule_context: S.list(S.str()),
-  athlete_kept_plan: S.bool()
+  athlete_kept_plan: S.bool(),
+  engine_recommendation: S.str(),
+  options: S.list(S.str())
 });
+function engineAdvice(template, outcome, alternative, volumePct) {
+  const adjusted = `${template} with APEX\u2019s adjusted prescription (${volumePct}% volume)`;
+  const engine_recommendation = outcome === "normal" ? `Train ${template} as planned.` : outcome === "deferred" ? `Take a recovery day: APEX advises against ${template} today.` : outcome === "alternative" && alternative ? `Train ${alternative} instead of ${template} today.` : `Train ${adjusted}.`;
+  const options = outcome === "normal" ? ["recovery_day \u2014 take today as a recovery day (nothing is deleted)"] : [
+    `adapt \u2014 ${adjusted}`,
+    ...alternative ? [`alternative \u2014 ${alternative} instead of ${template}`] : [],
+    "recovery_day \u2014 take today as a recovery day (nothing is deleted)",
+    `keep \u2014 the original ${template} plan (the athlete chooses this in the app)`
+  ];
+  return { engine_recommendation, options };
+}
 function decisionView(d, i, u) {
   const x = i.decision;
   return {
@@ -3512,7 +3545,8 @@ function decisionView(d, i, u) {
     readiness: nul(x.readiness),
     recent_sessions: x.inputs?.recent ?? [],
     schedule_context: x.inputs?.context ?? [],
-    athlete_kept_plan: i.plan === "kept"
+    athlete_kept_plan: i.plan === "kept",
+    ...engineAdvice(i.templateName, x.outcome, x.alternativeTemplateId ? templateName2(d, x.alternativeTemplateId) : null, round((x.volumeFactor - 1) * 100))
   };
 }
 function programName(d, e) {
@@ -3805,11 +3839,12 @@ var READ_TOOLS = [
   {
     name: "get_exercise_history",
     access: "read",
-    description: "One lift\u2019s logged sessions (newest first, all sets), best set and best estimated 1RM. If the name is ambiguous, returns candidate exercises to ask about.",
+    description: 'One lift\u2019s logged sessions (newest first, all sets), best set and best estimated 1RM. lookup says whether the athlete has logged it ("no_history": nothing logged) or which of their logged exercises to ask about ("ambiguous").',
     input: S.obj({ exercise: EXERCISE_QUERY, limit: S.orNull(S.int(1, 20, "Sessions to return. Default 6.")) }),
     output: S.obj({
       exercise: S.orNull(EXERCISE),
       matches: S.list(EXERCISE),
+      lookup: LOOKUP,
       total_sessions: S.num(),
       sessions: S.list(S.obj({ date: S.str(), template: S.str(), sets: S.list(S.str()), notes: S.orNull(S.str()) })),
       best_set: S.orNull(S.str()),
@@ -3839,6 +3874,7 @@ var READ_TOOLS = [
     output: S.obj({
       exercise: S.orNull(EXERCISE),
       matches: S.list(EXERCISE),
+      lookup: LOOKUP,
       recommendation: S.orNull(S.obj({ action: S.str(), weight: S.orNull(S.str()), reps: S.num(), reason: S.str() })),
       based_on: S.orNull(S.obj({ date: S.str(), sets: S.list(S.str()) })),
       on_today_plan: S.bool(),
@@ -3873,11 +3909,12 @@ var READ_TOOLS = [
     output: S.obj({
       exercise: S.orNull(EXERCISE),
       matches: S.list(EXERCISE),
+      lookup: S.orNull(LOOKUP),
       total: S.num(),
       records: S.list(S.obj({ date: S.str(), exercise: S.str(), kind: S.str(), detail: S.str() }))
     }),
     run(d, a) {
-      const f = a.exercise ? findExercise(d, a.exercise) : { exercise: null, matches: [] };
+      const f = a.exercise ? findExercise(d, a.exercise) : { exercise: null, matches: [], lookup: null };
       if (a.exercise && !f.exercise) return { ...f, total: 0, records: [] };
       const u = unitsOf(d);
       const recs = d.records.filter((r) => !f.exercise || r.exerciseId === f.exercise.id).sort((x, y) => y.date.localeCompare(x.date));
@@ -3963,29 +4000,6 @@ async function runTool(name, rawArgs, ctx) {
 }
 
 // backend/ai/service.ts
-var ConversationStore = class {
-  constructor(maxTurns = 8, ttlMs = 2 * 36e5, maxConversations = 5e3) {
-    this.maxTurns = maxTurns;
-    this.ttlMs = ttlMs;
-    this.maxConversations = maxConversations;
-  }
-  maxTurns;
-  ttlMs;
-  maxConversations;
-  map = /* @__PURE__ */ new Map();
-  key = (userId, id) => `${userId}\0${id}`;
-  get(userId, id, now = Date.now()) {
-    const e = this.map.get(this.key(userId, id));
-    return e && now - e.at <= this.ttlMs ? e.turns : [];
-  }
-  add(userId, id, turns, now = Date.now()) {
-    const k = this.key(userId, id);
-    const prev = this.get(userId, id, now);
-    this.map.delete(k);
-    this.map.set(k, { at: now, turns: [...prev, ...turns].slice(-this.maxTurns) });
-    if (this.map.size > this.maxConversations) this.map.delete(this.map.keys().next().value);
-  }
-};
 var wellFormed = (c) => c?.type === "function" && typeof c.id === "string" && typeof c.function?.name === "string" && typeof c.function?.arguments === "string";
 var TOOL_DEFS = toolDefinitions();
 var TOOL_NAMES = new Set(TOOLS.map((t) => t.name));
@@ -4021,12 +4035,10 @@ var AIService = class {
   constructor(deps) {
     this.deps = deps;
     this.log = deps.logger ?? consoleLogger;
-    this.conversations = deps.conversations ?? new ConversationStore(deps.config.limits.historyTurns);
     this.actions = deps.actions;
   }
   deps;
   log;
-  conversations;
   actions;
   model(mode) {
     return this.deps.config.models[mode];
@@ -4038,7 +4050,8 @@ var AIService = class {
     const model = this.model(chat.mode);
     const messages = [
       { role: "system", content: INSTRUCTIONS },
-      ...this.conversations.get(chat.userId, chat.conversationId, now()).map((t) => ({ role: t.role, content: t.content })),
+      // continuity comes from the device's own conversation (the server keeps none between requests)
+      ...(chat.history ?? []).map((t) => ({ role: t.role, content: t.content })),
       { role: "user", content: chat.message }
     ];
     const ctx = { data: chat.data, today: chat.today, proposals: [] };
@@ -4053,7 +4066,6 @@ var AIService = class {
         if (!calls.length) {
           const text = (choice.message.content ?? choice.message.refusal ?? "").trim();
           if (!text) throw new AIError("model_error", choice.finish_reason === "length" ? "incomplete_output" : "empty_output");
-          this.conversations.add(chat.userId, chat.conversationId, [{ role: "user", content: chat.message }, { role: "assistant", content: text }], now());
           const draft = ctx.proposals.at(-1);
           const action = draft ? await this.actions.create(draft, chat.userId, chat.conversationId) : void 0;
           return {
@@ -4132,7 +4144,7 @@ var AIService = class {
 // backend/ai/handler.ts
 function createDeps(config, db, makeClient, logger = consoleLogger) {
   const actions = new ActionStore(db);
-  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, conversations: new ConversationStore(config.ai.limits.historyTurns), actions });
+  const ai = config.ai && new AIService({ client: makeClient(config.ai), config: config.ai, logger, actions });
   if (!ai) logger({ event: "ai.config", problem: "no AI provider key / APEX_AI_MODEL set: chat is unavailable (development)" });
   return {
     env: config.env,
@@ -4271,6 +4283,9 @@ async function handleChat(req, deps, ctx = { rid: "", log: deps.logger, clientIp
     const r = gate.body;
     const message = r.message.trim();
     if (!message) return fail("invalid_request", { detail: "$.message: empty" });
+    const history = r.history ?? [];
+    if (history.some((t) => !t.content.trim())) return fail("invalid_request", { detail: "$.history: empty message" });
+    if (history.reduce((n, t) => n + t.content.length, 0) > deps.limits.maxHistoryChars) return fail("invalid_request", { detail: "$.history: too long" });
     const today = r.context?.today ?? utcDate(now);
     if (!plausibleToday(today, now)) return fail("invalid_request", { detail: "$.context.today: not today" });
     if (!deps.ai) return fail("ai_unavailable");
@@ -4278,7 +4293,7 @@ async function handleChat(req, deps, ctx = { rid: "", log: deps.logger, clientIp
     if (r.context?.athlete_data !== void 0 && !data) return fail("invalid_request", { detail: "$.context.athlete_data: not valid APEX data" });
     const mode = r.mode ?? "default";
     model = deps.ai.model(mode);
-    const { rounds, ...out } = await deps.ai.respond({ userId: gate.user.userId, conversationId: r.conversation_id ?? randomUUID2(), message, mode, data, today, log: ctx.log });
+    const { rounds, ...out } = await deps.ai.respond({ userId: gate.user.userId, conversationId: r.conversation_id ?? randomUUID2(), message, history, mode, data, today, log: ctx.log });
     stats = { rounds, tools: out.tools_used.length };
     if (out.action) ctx.log({ event: "ai.action", op: "propose", type: out.action.type, ok: true });
     return reply(200, out);
@@ -4350,11 +4365,7 @@ async function handleAction(req, deps, id, op, ctx = { rid: "", log: deps.logger
     const claim = await deps.actions.claim(id, user);
     if (!claim) return outcome(await deps.actions.get(id, user));
     const result = await execute(claim.action, data, body.context.today);
-    const recorded = await deps.actions.finish(claim, result);
-    if (recorded.result?.timestamp === result.timestamp) {
-      deps.ai?.conversations.add(user, recorded.conversationId, [{ role: "assistant", content: resultMessage(recorded, result) }]);
-    }
-    return outcome(recorded);
+    return outcome(await deps.actions.finish(claim, result));
   } catch (e) {
     const down = unavailable(e);
     ctx.log({ event: "ai.error", where: op, category: down ? "database_unavailable" : "internal" });

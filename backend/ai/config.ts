@@ -15,8 +15,13 @@ export interface AILimits {
   maxOutputTokens: number;
   requestsPerWindow: number;
   windowMs: number;
-  /** Conversation turns (user + assistant) kept for continuity. */
+  /**
+   * Earlier messages (user + assistant) a request may carry for continuity — the device keeps the
+   * conversation; the server keeps none (each request may run on a fresh instance).
+   */
   historyTurns: number;
+  /** Their total length. */
+  maxHistoryChars: number;
   /** Confirm/cancel per athlete (they don't call the model). */
   actionRequestsPerWindow: number;
   /** Device registrations: per client address, and for the whole service, per hour. */
@@ -36,6 +41,7 @@ export const DEFAULT_LIMITS: AILimits = {
   requestsPerWindow: 20,
   windowMs: 10 * 60_000,
   historyTurns: 8,
+  maxHistoryChars: 4000,
   actionRequestsPerWindow: 60,
   registrationsPerIpPerHour: 10,
   registrationsPerHour: 500,

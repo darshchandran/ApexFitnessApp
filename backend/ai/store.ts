@@ -56,7 +56,8 @@ export class ActionStore {
   private clock: () => number;
   /** A claim older than this with no result is treated as abandoned (the server died mid-execution). */
   private leaseMs: number;
-  private keepMs: number;
+  /** How long an action (and the records in its result) is kept for retries and replays. */
+  readonly keepMs: number;
   /** How long a confirm waits for another request's execution before answering "in progress". */
   private settleMs: number;
 
@@ -64,16 +65,17 @@ export class ActionStore {
     this.ttlMs = opts.ttlMs ?? 5 * 60_000;
     this.clock = opts.clock ?? Date.now;
     this.leaseMs = opts.leaseMs ?? 60_000;
-    this.keepMs = opts.keepMs ?? 7 * 24 * 3_600_000;
     this.settleMs = opts.settleMs ?? 10_000;
+    // 24 h covers any retry or replay a device makes; never shorter than an action can still be
+    // pending (expiry) or executing (lease + settle), so nothing live is ever deleted
+    this.keepMs = Math.max(opts.keepMs ?? 24 * 3_600_000, this.ttlMs + this.leaseMs + this.settleMs);
   }
 
   private now = () => new Date(this.clock());
 
   async create(draft: ActionDraft, userId: string, conversationId: string): Promise<StoredAction> {
     const now = this.now();
-    // old actions (and the records in their results) are not kept longer than needed for retries
-    if (Math.random() < 0.05) await this.db.query('delete from ai_actions where created_at < $1', [new Date(now.getTime() - this.keepMs)]);
+    await this.purge(now);
     const r = await this.db.query<Row>(
       `insert into ai_actions (id, identity_id, conversation_id, type, arguments, arguments_hash, basis, summary, preview, status, created_at, expires_at, updated_at)
        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $10) returning *`,
@@ -81,6 +83,15 @@ export class ActionStore {
         draft.summary, JSON.stringify(draft.preview), now, new Date(now.getTime() + this.ttlMs)],
     );
     return fromRow(r.rows[0]);
+  }
+
+  /**
+   * Deletes actions older than the retention window — only ai_actions rows, by age. Runs whenever an
+   * action is proposed. ponytail: with no new proposals, old rows wait for the next one; a scheduled
+   * job (pg_cron) would make the 24 h a hard ceiling.
+   */
+  async purge(now = this.now()): Promise<number> {
+    return (await this.db.query('delete from ai_actions where created_at < $1', [new Date(now.getTime() - this.keepMs)])).rowCount;
   }
 
   /** The athlete's own action, or undefined — another athlete's id is indistinguishable from a missing one. */
