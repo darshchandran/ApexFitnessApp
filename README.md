@@ -1,6 +1,6 @@
 # APEX
 
-Athlete training app — basketball, gym, plyometrics. **Plan → Train → Log → Adapt → Progress.**
+Athlete training app — basketball, gym, plyometrics, nutrition. **Plan → Train → Log → Adapt → Progress.**
 The user owns the program; Apex executes it and adapts each day to recent load. Local-first, works offline.
 
 ## Run
@@ -46,12 +46,19 @@ Key domain modules:
 | `progression.ts` | Double progression with an explanation string |
 | `records.ts` / `history.ts` | e1RM, PR detection, previous performance, weekly sets per muscle |
 | `schedule.ts` | Day resolution, rotations (pointer advances on completion), week projection |
+| `foods.ts` | Nutrition food table (Indian staples, per 100 g, provenance noted, no beef) + meal templates |
+| `nutrition.ts` | Calorie/macro targets, day type from APEX's own plan and logs, daily food totals, meal suggestions, weight trend |
 
 Generator pipeline: template → schedule → recent context → load → recovery → muscle volume → adaptation decision → generated workout → athlete's choice (ADAPT / KEEP PLAN / alternative / recovery day) → instance. Strain per area = today's load + load above the athlete's normal day over the last 4 days + this week above their usual week; recovery scales how much changes but never decides alone. Exercise cuts follow priority (primary protected, optional first), cost, redundancy and weekly volume.
 
 Three separate concepts are stored: **template** (user's program) → **prescription** (`instance.exercises[].prescribed`, with original `templateSets`) → **actual** (`sets` / `logs`).
 
 Training load is an internal management metric in arbitrary units, not a clinical measurement.
+
+**Nutrition** (tab, `food` and `nutrition-profile` routes) is kept apart from training: two documents (`nutrition` = profile and per-day planner choices, `foodLog` = what was eaten) and it only *reads* training data. Weight reuses the body log; height and target weight reuse the athlete profile.
+- Targets: BMR (Mifflin–St Jeor; the midpoint of the male/female equations, labelled, while sex is unset) × a daily-life factor (1.3 / 1.4 / 1.55) + the 14-day average of *logged* training energy (MET-based: basketball by RPE, gym 5, plyo 7; planned sessions never count) = maintenance; + ≈10% (200–400 kcal) for gradual gain; + any weight-trend adjustments the athlete applied. Protein 1.8 g/kg, fat ≈25% (≥ 0.8 g/kg), carbs the rest. The athlete can set their own calories/protein/fat.
+- Weight trend: this week's median weigh-in vs two weeks earlier (3+ weigh-ins each). Aim ≈0.25–0.75%/week; flat → suggest +150 kcal, too fast → −150; never from one weigh-in; nothing within 14 days of the last change; only applied when the athlete taps Apply.
+- Suggestions (four meals + a separate pre-gym meal on gym days, timed by how long before training; recovery snacks after basketball) are scaled templates. They count only once logged ("Ate this" / Add food). Every number is an estimate from the food table — edit values in `foods.ts`; logged entries keep the numbers they were logged with.
 
 Reliability rules (enforced in `services/apex.ts`, covered by `services/__tests__/hardening.test.ts`):
 completed sessions are read-only; identical taps within 1.5 s are one action (sets, practices, finish);
@@ -82,7 +89,7 @@ backend/ai/handler.ts   routes: /ai/auth/register|refresh|revoke, /ai/chat, /ai/
 backend/ai/auth.ts      per-install athlete identity: 15-min access tokens, rotating refresh tokens (hashed, reuse revokes)
 backend/ai/store.ts     persistent actions (exactly-once via conditional UPDATEs) and per-athlete rate limits, in Postgres
 backend/ai/service.ts   Chat Completions tool loop (Groq; OpenAI optional), tool-round/call caps, deadline, safe errors
-backend/ai/tools.ts     12 read-only tools + propose tools for enabled actions (nothing executes from the model)
+backend/ai/tools.ts     14 read-only tools (12 training, 2 nutrition) + propose tools for enabled actions (nothing executes from the model)
 backend/ai/actions.ts   action contracts; preview/execution through the app's own service on a private copy
 backend/db/             pg driver, migrator; local.ts / test-postgres.mjs = PGlite for development and tests only
 supabase/migrations/    the schema (RLS on, closed to Supabase's anon/authenticated roles)
@@ -96,7 +103,7 @@ supabase/migrations/    the schema (RLS on, closed to Supabase's anon/authentica
 
 **Production checklist:** see [DEPLOY.md](DEPLOY.md).
 
-Conversation context comes from the device: each question carries the recent conversation (≤ 8 messages, ≤ 4,000 characters, text only) because the server keeps none between requests; no conversation text is stored server-side. A daily GitHub Actions check calls `/readyz` (see DEPLOY.md §7).
+Conversation context comes from the device: each question carries the recent conversation (≤ 8 messages, ≤ 4,000 characters, text only) because the server keeps none between requests; no conversation text is stored server-side. The food log sent with a question is the last 14 days only. Nutrition is read-only for the AI: it can't log food or weight or change targets. A daily GitHub Actions check calls `/readyz` (see DEPLOY.md §7).
 
 ## Not in this phase
 

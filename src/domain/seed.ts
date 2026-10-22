@@ -1,3 +1,4 @@
+import { emptyNutrition } from './nutrition';
 import { gymExercise, hasGymExercise, hasPlyoExercise } from './catalog';
 import type {
   ApexData, PlyometricTemplate, PlyometricTemplateExercise, TrainingPlan, WorkoutTemplate, WorkoutTemplateExercise,
@@ -223,5 +224,7 @@ export function seedData(now: Date): ApexData {
     bodyMetrics: [],
     performance: [],
     records: [],
+    nutrition: emptyNutrition(),
+    foodLog: [],
   };
 }

@@ -12,6 +12,7 @@ type TabBarProps = Parameters<NonNullable<ComponentProps<typeof Tabs>['tabBar']>
 const TABS: Record<string, { label: string; icon: IconName }> = {
   index: { label: 'Home', icon: 'home' },
   train: { label: 'Train', icon: 'train' },
+  nutrition: { label: 'Nutrition', icon: 'food' },
   progress: { label: 'Progress', icon: 'progress' },
   program: { label: 'Program', icon: 'program' },
 };
@@ -52,6 +53,7 @@ export default function TabLayout() {
     <Tabs tabBar={(p) => <ApexTabBar {...p} />} screenOptions={{ headerShown: false, freezeOnBlur: true, sceneStyle: { backgroundColor: C.bg } }}>
       <Tabs.Screen name="index" />
       <Tabs.Screen name="train" />
+      <Tabs.Screen name="nutrition" />
       <Tabs.Screen name="progress" />
       <Tabs.Screen name="program" />
     </Tabs>

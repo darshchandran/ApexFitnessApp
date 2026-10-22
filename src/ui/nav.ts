@@ -9,6 +9,8 @@ export const go = {
   practice: () => router.push('/practice'),
   settings: () => router.push('/settings'),
   ai: () => router.push('/ai'),
+  food: (date: string, meal: string, entry?: string) => router.push({ pathname: '/food', params: { date, meal, ...(entry && { entry }) } }),
+  nutritionProfile: () => router.push('/nutrition-profile'),
   train: () => router.navigate('/train'),
 };
 

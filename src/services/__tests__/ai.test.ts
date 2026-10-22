@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { memoryStore } from '../../data/store';
 import { createApex } from '../apex';
-import { aiServerUrl, CONNECTION_KEY, CONVERSATION_KEY, createAssistant, HISTORY_CHARS, HISTORY_TURNS, MAX_MESSAGE, recentTurns, type ApexMessage, type Message, type UserMessage } from '../ai';
+import { aiServerUrl, CONNECTION_KEY, CONVERSATION_KEY, createAssistant, FOOD_DAYS, HISTORY_CHARS, HISTORY_TURNS, MAX_MESSAGE, recentTurns, type ApexMessage, type Message, type UserMessage } from '../ai';
 import { memorySecrets, REFRESH_KEY } from '../aiSession';
 
 const NOW = new Date(2026, 9, 7, 18);
@@ -59,6 +59,18 @@ afterEach(() => {
 });
 
 describe('chat', () => {
+  it('sends only the last 14 days of the food log; older food stays on the device', async () => {
+    const { ai, calls, app } = await setup([reply('ok')]);
+    const today = app.logFood({ date: '2026-10-07', meal: 'lunch', foodId: 'dal', qty: 1 })!;
+    const edge = app.logFood({ date: '2026-09-24', meal: 'lunch', foodId: 'rice', qty: 1 })!;
+    app.logFood({ date: '2026-09-23', meal: 'dinner', foodId: 'egg', qty: 2 });
+    await ai.send('How much protein have I had?');
+    const sent = (calls[0].body.context as { athlete_data: { foodLog: { id: string }[] } }).athlete_data;
+    expect(FOOD_DAYS).toBe(14);
+    expect(sent.foodLog.map((e) => e.id)).toEqual([today.id, edge.id]);
+    expect(app.getState().data.foodLog).toHaveLength(3);
+  });
+
   it('sends to the APEX AI server with the bearer token, today’s date and the device’s data — and keeps the conversation id', async () => {
     const { ai, calls, app } = await setup([reply('Your load is moderate.'), reply('Legs.')]);
     expect(await ai.send('  How loaded am I?  ')).toBe(true);

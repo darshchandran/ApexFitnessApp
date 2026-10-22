@@ -9,6 +9,7 @@
 // there is no execute tool: execution happens only at POST /ai/actions/:id/confirm.
 import { GYM_EXERCISES, gymExercise, hasGymExercise } from '../../src/domain/catalog';
 import { APEX_CONFIG } from '../../src/domain/config';
+import { amountText, FOOD_DATA_NOTE, gramsOf, macrosOf, searchFoods, ZERO, addMacros, type Macros } from '../../src/domain/foods';
 import { completed } from '../../src/domain/history';
 import { dayLoads, plyoSetsDone } from '../../src/domain/load';
 import { adaptationStatus, exerciseBests, exerciseHistory, liveExercise, nextProgression, workoutSummary } from '../../src/domain/logbook';
@@ -19,6 +20,7 @@ import { buildContext } from '../../src/domain/strain';
 import type { ApexData, ISODate, SessionInstance, SetLog } from '../../src/domain/types';
 import { addDays, weekdayIndex } from '../../src/domain/util';
 import { muscleVolume } from '../../src/domain/volume';
+import { DAY_LABEL, dayLog, dayPlan, dayType, MEAL_LABEL, nutritionTargets, remaining, weightTrend } from '../../src/domain/nutrition';
 import { progressOverview, todayOverview } from '../../src/services/apex';
 import { ACTIONS, ActionRejected, simulate, type ActionDraft, type ActionType } from './actions';
 import { check, S, type Schema } from './schemas';
@@ -198,6 +200,9 @@ function programName(d: ApexData, e: DayEntry) {
 }
 
 const NONE = S.obj({});
+const MACROS = S.obj({ kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num() });
+const macros = (m: Macros) => ({ kcal: round(m.kcal), protein_g: round(m.protein), carbs_g: round(m.carbs), fat_g: round(m.fat) });
+const NUTRITION_NOTE = `Estimates, not prescriptions or medical advice. ${FOOD_DATA_NOTE}`;
 const LOAD_NOTE = 'Training load is APEX’s internal programming number (arbitrary units), not a medical measure. Only logged sessions count.';
 
 // ---------- the tools ----------
@@ -515,6 +520,83 @@ const READ_TOOLS: ApexTool[] = [
         note: 'Logged working sets; secondary muscles count half. A programming guide, not a measure of stimulus.',
         groups: muscleVolume(d.instances, ctx.today).map((g) => ({ group: g.group, sets: g.sets, target_low: g.target[0], target_high: g.target[1], sessions: g.frequency, status: g.status })),
       };
+    },
+  },
+  {
+    name: 'get_nutrition_day',
+    access: 'read',
+    description: 'Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food the athlete logged and what is left, the day type, today’s suggested meals (not eaten until logged), weight trend and diet preferences.',
+    input: S.obj({ date: S.orNull(S.text('^\\d{4}-\\d{2}-\\d{2}$', 'YYYY-MM-DD; null = today')) }),
+    output: S.obj({
+      date: S.str(), set_up: S.bool(), missing: S.list(S.str()), targets: S.orNull(MACROS), basis: S.list(S.str()),
+      day_type: S.str(), logged: S.list(S.obj({ meal: S.str(), food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() })),
+      eaten: MACROS, remaining: S.orNull(MACROS),
+      suggested: S.list(S.obj({ meal: S.str(), name: S.str(), items: S.str(), kcal: S.num(), protein_g: S.num(), logged: S.bool() })),
+      weight: S.obj({ latest: S.orNull(S.str()), week_median: S.orNull(S.str()), target: S.orNull(S.str()), trend: S.str(), per_week: S.orNull(S.str()), suggestion_kcal: S.num(), note: S.str() }),
+      diet: S.str(), note: S.str(),
+    }),
+    run(d, a, ctx) {
+      const date = (a.date as string | null) ?? ctx.today;
+      if (date > ctx.today) throw new Error('future date');
+      const u = unitsOf(d);
+      const t = nutritionTargets(d, date);
+      const log = dayLog(d, date);
+      const day = dayType(d, date, ctx.today);
+      const plan = t.ok && date === ctx.today ? dayPlan(d, date, ctx.today, t.targets) : undefined;
+      const w = weightTrend(d, ctx.today);
+      const p = d.nutrition.profile;
+      return {
+        date, set_up: !!p.setupAt, missing: t.ok ? [] : t.missing, targets: t.ok ? macros(t.targets) : null, basis: t.ok ? t.targets.notes.slice(1) : [],
+        day_type: `${DAY_LABEL[day.kind]}${day.gym.done || day.basketball.done ? ' (logged)' : day.kind === 'rest' ? '' : ' (planned)'}`,
+        logged: log.entries.slice(0, 40).map((e) => ({ meal: MEAL_LABEL[e.meal], food: e.name, amount: amountText(e.qty, e.unit), kcal: e.kcal, protein_g: round(e.protein) })),
+        eaten: macros(log.totals), remaining: t.ok ? macros(remaining(t.targets, log.totals)) : null,
+        suggested: plan ? [...plan.meals, ...(plan.preGym ? [plan.preGym] : [])].map((m) => ({
+          meal: m.slot === 'preGym' && plan.preGym ? `Pre-gym (${plan.preGym.window})` : MEAL_LABEL[m.slot], name: m.name,
+          items: m.items.map((i) => `${i.name}: ${amountText(i.qty, i.unit)}`).join('; '), kcal: m.kcal, protein_g: round(m.protein), logged: m.eaten,
+        })) : [],
+        weight: {
+          latest: w.latest ? `${wtu(w.latest.kg, u)} on ${w.latest.date}` : null, week_median: w.weekKg === undefined ? null : wtu(w.weekKg, u),
+          target: d.profile.targetBodyweightKg === undefined ? null : wtu(d.profile.targetBodyweightKg, u), trend: w.status,
+          per_week: w.ratePerWeek === undefined ? null : wtu(w.ratePerWeek, u), suggestion_kcal: w.suggestion, note: w.note,
+        },
+        diet: `${p.diet ?? 'non-vegetarian'}; never: ${(p.avoid ?? ['beef']).join(', ')}; budget: ${p.budget ?? 'moderate'}; no supplements required`,
+        note: NUTRITION_NOTE,
+      };
+    },
+  },
+  {
+    name: 'get_meal_estimate',
+    access: 'read',
+    description: 'Calories and macros for foods from APEX’s food table (Indian staples). Use it for every number in a meal or food you suggest. Unknown foods come back with close matches.',
+    input: S.obj({
+      items: S.list(S.obj({
+        food: S.text('^[^\\n]{1,60}$', 'As the athlete would say it, e.g. "dal", "anda", "chicken curry"'),
+        quantity: S.orNull(S.num()), unit: S.orNull(S.str('e.g. "egg", "katori", "roti", "g"; null = the food’s usual unit')),
+      }), 12),
+    }),
+    output: S.obj({
+      items: S.list(S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
+      not_found: S.list(S.obj({ asked: S.str(), closest: S.list(S.str()) })),
+      total: MACROS, note: S.str(),
+    }),
+    run(_d, a) {
+      const items: { food: string; amount: string; kcal: number; protein_g: number; carbs_g: number; fat_g: number; cost: string }[] = [];
+      const missing: { asked: string; closest: string[] }[] = [];
+      let total = ZERO;
+      for (const x of a.items as { food: string; quantity: number | null; unit: string | null }[]) {
+        const f = searchFoods(x.food, 1)[0];
+        const unit = x.unit === 'g' || x.unit === 'ml' ? f?.base : x.unit && f?.units.some((v) => v.unit === x.unit) ? x.unit : f?.units[0].unit;
+        const qty = x.quantity !== null && x.quantity > 0 && x.quantity <= 5000 ? x.quantity : f?.serve;
+        const grams = f && unit && qty ? gramsOf(f, qty, unit) : undefined;
+        if (!f || !grams || grams > 3000) {
+          missing.push({ asked: x.food, closest: searchFoods(x.food.split(' ')[0], 3).map((c) => c.name) });
+          continue;
+        }
+        const m = macrosOf(f, grams);
+        total = addMacros(total, m);
+        items.push({ food: f.name, amount: amountText(qty!, unit!), ...macros(m), cost: f.cost === 1 ? 'budget' : 'moderate' });
+      }
+      return { items, not_found: missing, total: macros(total), note: NUTRITION_NOTE };
     },
   },
 ];

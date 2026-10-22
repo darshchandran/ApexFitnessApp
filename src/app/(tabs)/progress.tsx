@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
-import Svg, { Circle, Polyline } from 'react-native-svg';
 
 import { GROUP_LABEL } from '@/domain/areas';
 import { plyoBests, strengthTrend, trainedExercises } from '@/domain/history';
@@ -10,14 +9,14 @@ import type { BodyMetricKind, PerformanceKind, PersonalRecord } from '@/domain/t
 import { addDays } from '@/domain/util';
 import { progressOverview } from '@/services/apex';
 import { apex, useApex } from '@/services/useApex';
-import { BottomSheet } from '@/ui/BottomSheet';
+import { LogSheet } from '@/ui/BottomSheet';
 import { shortDate } from '@/ui/format';
 import { localize, useUnits, wt } from '@/ui/units';
 import { ContextPrompt } from '@/ui/context';
 import { fromUnits, toUnits } from '@/domain/profile';
 import { go } from '@/ui/nav';
-import { ApexCard, Button, Chip, Divider, EmptyState, Metric, PRBadge, Screen, SectionHeader, Segmented, StatusChip, Stepper, Txt } from '@/ui/primitives';
-import { SessionRow, basketballRowProps, instanceRowProps } from '@/ui/training';
+import { ApexCard, Chip, Divider, EmptyState, Metric, PRBadge, Screen, SectionHeader, Segmented, StatusChip, Txt } from '@/ui/primitives';
+import { SessionRow, Sparkline, basketballRowProps, instanceRowProps } from '@/ui/training';
 import { bandLabel, bandTone, C, F, S } from '@/ui/theme';
 import type { Trend } from '@/domain/strain';
 
@@ -38,20 +37,6 @@ const BODY: { kind: BodyMetricKind; label: string; unit: string }[] = [
   { kind: 'arm', label: 'Arm', unit: 'cm' },
   { kind: 'thigh', label: 'Thigh', unit: 'cm' },
 ];
-
-function Sparkline({ values, width = 120, height = 36 }: { values: number[]; width?: number; height?: number }) {
-  if (values.length < 2) return null;
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
-  const pts = values.map((v, i) => [(i / (values.length - 1)) * (width - 6) + 3, height - 3 - ((v - lo) / (hi - lo || 1)) * (height - 6)]);
-  const last = pts[pts.length - 1];
-  return (
-    <Svg width={width} height={height}>
-      <Polyline points={pts.map((p) => p.join(',')).join(' ')} stroke={C.text2} strokeWidth={1.5} fill="none" />
-      <Circle cx={last[0]} cy={last[1]} r={3} fill={C.accent} />
-    </Svg>
-  );
-}
 
 export default function Progress() {
   const { data } = useApex();
@@ -282,20 +267,6 @@ export default function Progress() {
           : { ...b, initial: latestBody(b.kind).pop()?.value ?? 40 })}
         onSave={(k, v) => apex.addBodyMetric(k as BodyMetricKind, k === 'bodyweight' ? fromUnits(v, u) : v)} onClose={() => setSheet(null)} />}
     </Screen>
-  );
-}
-
-function LogSheet({ title, options, onSave, onClose }: { title: string; options: { kind: string; label: string; unit: string; initial: number }[]; onSave: (kind: string, v: number) => void; onClose: () => void }) {
-  const [kind, setKind] = useState(options[0].kind);
-  const opt = options.find((o) => o.kind === kind)!;
-  const [value, setValue] = useState(opt.initial);
-  return (
-    <BottomSheet visible onClose={onClose} title={title} footer={<Button label="Save" disabled={!(value > 0)} onPress={() => { onSave(kind, value); onClose(); }} />}>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: S.lg }}>
-        {options.map((o) => <Chip key={o.kind} label={o.label} selected={o.kind === kind} onPress={() => { setKind(o.kind); setValue(o.initial); }} style={{ flexBasis: '30%', flexGrow: 1 }} />)}
-      </View>
-      <Stepper label={opt.label} unit={opt.unit} value={value} step={opt.unit === 'kg' ? 0.1 : opt.unit === 'lb' ? 0.2 : 0.5} min={0} max={opt.unit === 'kg' ? 400 : opt.unit === 'lb' ? 880 : 500} onChange={setValue} />
-    </BottomSheet>
   );
 }
 

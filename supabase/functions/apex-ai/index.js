@@ -131,8 +131,8 @@ var uid = (prefix = "id") => `${prefix}_${Date.now().toString(36)}${(counter++).
 var pad = (n) => String(n).padStart(2, "0");
 var toISODate = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 var parseISODate = (iso) => {
-  const [y, m, d] = iso.split("-").map(Number);
-  return new Date(y, m - 1, d);
+  const [y, m2, d] = iso.split("-").map(Number);
+  return new Date(y, m2 - 1, d);
 };
 var addDays = (iso, n) => {
   const d = parseISODate(iso);
@@ -187,9 +187,9 @@ function pgDb(connectionString, opts = {}) {
   };
 }
 var MIGRATIONS_DIR = process.env.APEX_MIGRATIONS_DIR ?? join(".", "..", "..", "supabase", "migrations");
-var readMigrations = (dir = MIGRATIONS_DIR) => readdirSync(dir).filter((f) => f.endsWith(".sql")).sort().map((name) => ({ name, sql: readFileSync(join(dir, name), "utf8") }));
+var readMigrations = (dir = MIGRATIONS_DIR) => readdirSync(dir).filter((f2) => f2.endsWith(".sql")).sort().map((name) => ({ name, sql: readFileSync(join(dir, name), "utf8") }));
 async function pendingMigrations(db, migrations = readMigrations()) {
-  const names = migrations.map((m) => m.name);
+  const names = migrations.map((m2) => m2.name);
   const t = await db.query("select to_regclass('public.apex_migrations')::text as ok");
   if (!t.rows[0]?.ok) return names;
   const done = new Set((await db.query("select name from public.apex_migrations")).rows.map((r) => r.name));
@@ -227,7 +227,9 @@ var DOCS = [
   "recovery",
   "bodyMetrics",
   "performance",
-  "records"
+  "records",
+  "nutrition",
+  "foodLog"
 ];
 var PREFIX = "apex:v1:";
 var docKey = (c) => PREFIX + c;
@@ -235,20 +237,20 @@ var instanceKey = (id) => `${PREFIX}instance:${id}`;
 var INDEX = `${PREFIX}instance-index`;
 var LEGACY_INSTANCES = `${PREFIX}instances`;
 function memoryStore(initial = {}) {
-  const m = new Map(Object.entries(initial));
+  const m2 = new Map(Object.entries(initial));
   const s = {
     failWrites: false,
     async getItem(k) {
-      return m.get(k) ?? null;
+      return m2.get(k) ?? null;
     },
     async setItem(k, v) {
       if (s.failWrites) throw new Error("disk full");
-      m.set(k, v);
+      m2.set(k, v);
     },
     async removeItem(k) {
-      m.delete(k);
+      m2.delete(k);
     },
-    dump: () => Object.fromEntries(m)
+    dump: () => Object.fromEntries(m2)
   };
   return s;
 }
@@ -266,8 +268,14 @@ var VALID = {
   recovery: Array.isArray,
   bodyMetrics: listOfIds,
   performance: listOfIds,
-  records: listOfIds
+  records: listOfIds,
+  nutrition: (v) => isObj(v) && isObj(v.profile) && isObj(v.days),
+  // ponytail: one document for every day's log (~3 KB a day); move to per-day keys like sessions before it nears Android's ~2 MB per entry
+  foodLog: listOfIds
 };
+var MEAL_SLOTS = ["breakfast", "lunch", "snacks", "dinner", "preGym"];
+var amount = (v, max) => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= max;
+var validFoodEntry = (v) => isObj(v) && typeof v.id === "string" && typeof v.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v.date) && MEAL_SLOTS.includes(v.meal) && typeof v.name === "string" && amount(v.kcal, 5e3) && amount(v.protein, 500) && amount(v.carbs, 1e3) && amount(v.fat, 500) && amount(v.qty, 1e4);
 var validInstance = (v) => hasId(v) && isObj(v) && Array.isArray(v.exercises) && isObj(v.decision) && typeof v.date === "string" && v.exercises.every((e) => isObj(e) && (v.kind === "gym" ? Array.isArray(e.sets) : Array.isArray(e.logs)));
 function parse(raw) {
   if (raw === null) return null;
@@ -290,7 +298,7 @@ async function loadData(store) {
     found = true;
     if (p.ok && VALID[c](p.value)) {
       const v = p.value;
-      out[c] = Array.isArray(v) && c !== "recovery" ? v.filter(hasId) : v;
+      out[c] = c === "foodLog" ? v.filter(validFoodEntry) : Array.isArray(v) && c !== "recovery" ? v.filter(hasId) : v;
     } else {
       recovered.push(c);
       await backup(c, raws[i]);
@@ -799,7 +807,7 @@ function exerciseAreaShares(ex, primaryShare, secondaryShare) {
     out[a] = (out[a] ?? 0) + v;
   };
   add(MUSCLE_AREA[ex.primary], primaryShare);
-  for (const m of ex.secondary ?? []) add(MUSCLE_AREA[m], secondaryShare);
+  for (const m2 of ex.secondary ?? []) add(MUSCLE_AREA[m2], secondaryShare);
   if (ex.region === "lower") add("lower", 1);
   if (ex.region === "upper") add("upper", 1);
   return out;
@@ -818,7 +826,7 @@ var priorityOf = (te, ex) => te.priority ?? defaultPriority(ex);
 
 // src/domain/load.ts
 var BANDS = ["low", "moderate", "high", "extreme"];
-var bandFor = (value, [m, h, e]) => value >= e ? "extreme" : value >= h ? "high" : value >= m ? "moderate" : "low";
+var bandFor = (value, [m2, h, e]) => value >= e ? "extreme" : value >= h ? "high" : value >= m2 ? "moderate" : "low";
 var bandRank = (b) => BANDS.indexOf(b);
 var maxBand = (a, b) => bandRank(a) >= bandRank(b) ? a : b;
 var atLeast = (b, min) => bandRank(b) >= bandRank(min);
@@ -834,15 +842,15 @@ function basketballMovement(s, cfg = APEX_CONFIG) {
 }
 function basketballLoad(s, cfg = APEX_CONFIG) {
   const b = cfg.basketball;
-  const m = basketballMovement(s, cfg);
+  const m2 = basketballMovement(s, cfg);
   const total = s.rpe * s.durationMin * b.typeIntensity[s.sessionType ?? "mixed"];
-  const lowerShare = clamp(b.lowerShareBase + b.lowerSharePerLevel * (m.jumping + m.sprinting + m.changeOfDirection), b.lowerShareBase, b.lowerShareMax);
+  const lowerShare = clamp(b.lowerShareBase + b.lowerSharePerLevel * (m2.jumping + m2.sprinting + m2.changeOfDirection), b.lowerShareBase, b.lowerShareMax);
   const lower = total * lowerShare;
   const upper = total * (1 - lowerShare);
   const areas = { lower };
   const weights = Object.entries(b.lowerSplit).map(([area, w]) => {
     let v = w.base;
-    for (const k of ["jumping", "sprinting", "changeOfDirection", "running"]) v += (w[k] ?? 0) * m[k];
+    for (const k of ["jumping", "sprinting", "changeOfDirection", "running"]) v += (w[k] ?? 0) * m2[k];
     return [area, v];
   });
   const wSum = sum(weights.map(([, v]) => v));
@@ -850,9 +858,9 @@ function basketballLoad(s, cfg = APEX_CONFIG) {
   areas.trunk = upper * b.trunkShare;
   areas.upper = upper * (1 - b.trunkShare);
   for (const [area, share] of Object.entries(b.upperSplit)) areas[area] = areas.upper * share;
-  const jumps = s.durationMin * b.jumpsPerMinute[m.jumping];
-  const sprints = s.durationMin * b.sprintsPerMinute[m.sprinting];
-  const cuts = s.durationMin * b.cutsPerMinute[m.changeOfDirection];
+  const jumps = s.durationMin * b.jumpsPerMinute[m2.jumping];
+  const sprints = s.durationMin * b.sprintsPerMinute[m2.sprinting];
+  const cuts = s.durationMin * b.cutsPerMinute[m2.changeOfDirection];
   Object.assign(areas, { jump: jumps, sprint: sprints, cod: cuts, explosive: jumps + sprints + cuts });
   return { total, lower, upper, jumps, lowerShare, areas };
 }
@@ -1077,7 +1085,7 @@ function migrateAthleteContext(d) {
     profile: { ...profile, schedule: items.sort((a, b) => a.day - b.day) }
   };
 }
-var bodyweightKnown = (d) => d.bodyMetrics.some((m) => m.kind === "bodyweight");
+var bodyweightKnown = (d) => d.bodyMetrics.some((m2) => m2.kind === "bodyweight");
 var gymTimeKnown = (d) => d.profile.gymTime !== void 0 || scheduleOf(d).some((i) => i.kind === "gym" && i.enabled && !!i.time);
 function profileFacts(d) {
   const p = d.profile;
@@ -1290,7 +1298,7 @@ function weeklySets(instances, end) {
       if (!n) continue;
       const ex = gymExercise(e.exerciseId);
       const groups = /* @__PURE__ */ new Map([[MUSCLE_GROUP[ex.primary], 1]]);
-      for (const m of ex.secondary ?? []) if (!groups.has(MUSCLE_GROUP[m])) groups.set(MUSCLE_GROUP[m], 0.5);
+      for (const m2 of ex.secondary ?? []) if (!groups.has(MUSCLE_GROUP[m2])) groups.set(MUSCLE_GROUP[m2], 0.5);
       for (const [g, w] of groups) out[g] += n * w;
     }
   }
@@ -1520,13 +1528,13 @@ function adaptGym(template, ctx, opts = {}, cfg = APEX_CONFIG) {
   const target = Math.round(sum(raw.map((r) => r.x)));
   const sets = {};
   for (const r of raw) sets[r.te.id] = r.drop ? 0 : Math.max(1, Math.min(r.base, Math.floor(r.x)));
-  let remaining = target - sum(Object.values(sets));
+  let remaining2 = target - sum(Object.values(sets));
   const frac = (r) => r.x - Math.floor(r.x);
   for (const r of raw.filter((x) => !x.drop).sort((p, q) => frac(q) - frac(p))) {
-    if (remaining <= 0) break;
+    if (remaining2 <= 0) break;
     if (sets[r.te.id] < r.base && frac(r) > 0) {
       sets[r.te.id] += 1;
-      remaining -= 1;
+      remaining2 -= 1;
     }
   }
   const programmed = sum(template.exercises.map((e) => e.sets));
@@ -1730,6 +1738,349 @@ function adaptPlyo(template, ctx, opts = {}, cfg = APEX_CONFIG) {
   };
 }
 
+// src/domain/foods.ts
+var FOOD_DATA_NOTE = "Estimates: rounded values in line with common food-composition references (e.g. USDA FoodData Central, Indian Food Composition Tables); home-style dishes are recipe estimates. Real portions and recipes vary.";
+var f = (id, name, [kcal, protein, carbs, fat], units, serve2, tags, o = {}) => ({ id, name, per100: { kcal, protein, carbs, fat }, units, serve: serve2, tags, base: o.base ?? "g", cost: o.cost ?? 1, source: o.source ?? "reference", ...o.aliases && { aliases: o.aliases } });
+var G = [{ unit: "g", grams: 1 }];
+var KATORI = (g = 150) => [{ unit: "katori", grams: g }, ...G];
+var ML = [{ unit: "ml", grams: 1 }];
+var FOODS = [
+  // eggs, meat, fish
+  f("egg", "Egg (whole)", [143, 12.6, 0.7, 9.5], [{ unit: "egg", grams: 50 }, ...G], 2, ["protein", "egg"], { aliases: ["eggs", "anda", "boiled egg", "omelette"] }),
+  f("egg-white", "Egg white", [52, 10.9, 0.7, 0.2], [{ unit: "white", grams: 33 }, ...G], 3, ["protein", "egg"]),
+  f("chicken-breast", "Chicken breast, cooked", [165, 31, 0, 3.6], G, 120, ["protein", "chicken"], { aliases: ["chicken", "grilled chicken"], cost: 2 }),
+  f("chicken-curry", "Chicken curry (home-style)", [150, 14, 4, 8.7], KATORI(), 1, ["protein", "chicken"], { aliases: ["chicken gravy"], cost: 2, source: "recipe" }),
+  f("fish", "Fish, cooked (rohu, basa)", [120, 22, 0, 3.5], G, 120, ["protein", "fish"], { aliases: ["rohu", "basa"], cost: 2 }),
+  f("fish-curry", "Fish curry (home-style)", [128, 13, 3, 7], KATORI(), 1, ["protein", "fish"], { aliases: ["machli", "macher jhol"], cost: 2, source: "recipe" }),
+  f("chicken-biryani", "Chicken biryani", [190, 9, 23, 7], [{ unit: "plate", grams: 300 }, ...G], 1, ["protein", "carb", "chicken"], { aliases: ["biryani"], cost: 2, source: "recipe" }),
+  // dairy
+  f("milk-toned", "Milk, toned", [58, 3.1, 4.7, 3], [{ unit: "glass", grams: 250 }, ...ML], 1, ["dairy", "protein"], { base: "ml", aliases: ["milk", "doodh"] }),
+  f("milk-full", "Milk, full-cream", [86, 3.2, 4.9, 6], [{ unit: "glass", grams: 250 }, ...ML], 1, ["dairy", "fat"], { base: "ml", aliases: ["whole milk"] }),
+  f("curd", "Curd (dahi)", [61, 3.5, 4.7, 3.3], KATORI(), 1, ["dairy", "protein"], { aliases: ["dahi", "yogurt", "yoghurt"] }),
+  f("buttermilk", "Buttermilk (chaas)", [25, 1.5, 2.2, 1.1], [{ unit: "glass", grams: 250 }, ...ML], 1, ["dairy"], { base: "ml", aliases: ["chaas", "chhaas"], source: "recipe" }),
+  f("paneer", "Paneer", [265, 18, 1.2, 21], G, 100, ["protein", "dairy", "fat"], { aliases: ["cottage cheese"], cost: 2 }),
+  // grains and breads
+  f("rice", "Rice, cooked", [130, 2.7, 28.2, 0.3], [{ unit: "bowl", grams: 150 }, ...G], 1, ["carb"], { aliases: ["chawal", "white rice"] }),
+  f("roti", "Roti / chapati", [275, 8.7, 47.5, 6.2], [{ unit: "roti", grams: 40 }, ...G], 2, ["carb"], { aliases: ["chapati", "phulka", "rotis"], source: "recipe" }),
+  f("paratha", "Paratha (plain)", [300, 7, 42, 12], [{ unit: "paratha", grams: 80 }, ...G], 1, ["carb", "fat"], { source: "recipe" }),
+  f("oats", "Oats (dry)", [379, 13, 68, 6.5], G, 50, ["carb"], { aliases: ["oatmeal", "rolled oats"] }),
+  f("bread", "Bread, whole wheat", [250, 12.5, 43, 3.5], [{ unit: "slice", grams: 28 }, ...G], 2, ["carb", "quick"], { aliases: ["toast", "brown bread"] }),
+  f("poha", "Poha (cooked)", [140, 2.8, 24, 3.7], [{ unit: "plate", grams: 200 }, ...G], 1, ["carb"], { source: "recipe" }),
+  f("upma", "Upma", [130, 3, 19, 4.5], [{ unit: "plate", grams: 200 }, ...G], 1, ["carb"], { source: "recipe" }),
+  f("idli", "Idli", [146, 4.5, 30, 1], [{ unit: "idli", grams: 40 }, ...G], 3, ["carb"], { aliases: ["idlis"], source: "recipe" }),
+  f("dosa", "Dosa (plain)", [168, 4, 25, 5.6], [{ unit: "dosa", grams: 80 }, ...G], 2, ["carb"], { source: "recipe" }),
+  f("sambar", "Sambar", [65, 3, 9, 2], KATORI(), 1, ["protein", "veg"], { source: "recipe" }),
+  f("khichdi", "Khichdi (moong dal & rice)", [120, 4.5, 20, 2.5], [{ unit: "bowl", grams: 250 }, ...G], 1, ["carb", "protein"], { source: "recipe" }),
+  // pulses and legumes
+  f("dal", "Dal (cooked, home-style)", [110, 6.5, 15, 2.8], KATORI(), 1, ["protein", "carb"], { aliases: ["daal", "toor dal", "moong dal", "masoor dal", "lentils"], source: "recipe" }),
+  f("rajma", "Rajma (curry)", [140, 6, 18, 4.5], KATORI(), 1, ["protein", "carb"], { aliases: ["kidney beans"], source: "recipe" }),
+  f("chole", "Chole (curry)", [150, 6.5, 19, 5.2], KATORI(), 1, ["protein", "carb"], { aliases: ["chana masala", "chickpeas"], source: "recipe" }),
+  f("soya-chunks", "Soya chunks (dry weight)", [345, 52, 33, 0.5], G, 40, ["protein"], { aliases: ["soya", "soy chunks", "nutrela"] }),
+  f("sprouts", "Moong sprouts", [30, 3, 4.2, 0.2], [{ unit: "bowl", grams: 150 }, ...G], 1, ["protein", "veg"], { aliases: ["sprouts salad"] }),
+  f("roasted-chana", "Roasted chana", [369, 22, 58, 5.2], [{ unit: "handful", grams: 30 }, ...G], 1, ["protein", "carb", "quick"], { aliases: ["chana", "bhuna chana", "roasted gram"] }),
+  f("sattu", "Sattu (roasted gram flour)", [406, 20.6, 65, 7], G, 40, ["protein", "carb"], { aliases: ["sattu drink"] }),
+  // nuts, fats, sweeteners
+  f("peanuts", "Peanuts, roasted", [585, 24, 21, 50], [{ unit: "handful", grams: 30 }, ...G], 1, ["fat", "protein", "quick"], { aliases: ["moongphali", "groundnuts"] }),
+  f("peanut-butter", "Peanut butter", [588, 25, 20, 50], [{ unit: "tbsp", grams: 16 }, ...G], 1, ["fat", "protein"], { cost: 2 }),
+  f("almonds", "Almonds", [579, 21, 22, 50], [{ unit: "handful", grams: 20 }, ...G], 1, ["fat"], { aliases: ["badam"], cost: 2 }),
+  f("ghee", "Ghee", [900, 0, 0, 100], [{ unit: "tsp", grams: 5 }, ...G], 1, ["fat"]),
+  f("oil", "Cooking oil", [884, 0, 0, 100], [{ unit: "tsp", grams: 5 }, ...G], 1, ["fat"], { aliases: ["oil"] }),
+  f("honey", "Honey", [304, 0.3, 82, 0], [{ unit: "tsp", grams: 7 }, ...G], 1, ["carb", "quick"]),
+  // vegetables, fruit
+  f("sabzi", "Mixed vegetable sabzi", [90, 2.5, 9, 5], KATORI(), 1, ["veg"], { aliases: ["sabji", "vegetables", "bhaji"], source: "recipe" }),
+  f("salad", "Salad (cucumber, tomato, onion)", [20, 0.9, 4, 0.2], [{ unit: "bowl", grams: 100 }, ...G], 1, ["veg"]),
+  f("potato", "Potato, boiled", [87, 1.9, 20.1, 0.1], [{ unit: "potato", grams: 150 }, ...G], 1, ["carb", "veg"], { aliases: ["aloo", "potatoes"] }),
+  f("sweet-potato", "Sweet potato, boiled", [76, 1.4, 17.7, 0.1], [{ unit: "potato", grams: 150 }, ...G], 1, ["carb", "veg"], { aliases: ["shakarkandi"] }),
+  f("banana", "Banana", [89, 1.1, 22.8, 0.3], [{ unit: "banana", grams: 118 }, ...G], 1, ["fruit", "carb", "quick"], { aliases: ["kela", "bananas"] }),
+  f("apple", "Apple", [52, 0.3, 12.5, 0.2], [{ unit: "apple", grams: 180 }, ...G], 1, ["fruit"], { aliases: ["seb"] }),
+  f("orange", "Orange", [47, 0.9, 11.8, 0.1], [{ unit: "orange", grams: 130 }, ...G], 1, ["fruit"], { aliases: ["santra"] }),
+  f("dates", "Dates", [282, 2.5, 68, 0.4], [{ unit: "date", grams: 8 }, ...G], 3, ["fruit", "carb", "quick"], { aliases: ["khajur"] })
+];
+var BY_ID = new Map(FOODS.map((x) => [x.id, x]));
+var foodById = (id) => BY_ID.get(id);
+var norm = (s) => s.toLowerCase().normalize("NFKD").replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+function searchFoods(query, limit = 20) {
+  const q = norm(query);
+  if (!q) return FOODS.slice(0, limit);
+  const words = q.split(" ");
+  const scored = FOODS.flatMap((x) => {
+    const names = [x.name, ...x.aliases ?? []].map(norm);
+    if (names.some((n) => n === q)) return [{ x, s: 0 }];
+    if (names.some((n) => n.startsWith(q))) return [{ x, s: 1 }];
+    if (names.some((n) => words.every((w) => n.includes(w)))) return [{ x, s: 2 }];
+    return [];
+  });
+  return scored.sort((a, b) => a.s - b.s).slice(0, limit).map((r) => r.x);
+}
+var ZERO = { kcal: 0, protein: 0, carbs: 0, fat: 0 };
+var r13 = (n) => Math.round(n * 10) / 10;
+var addMacros = (a, b) => ({ kcal: a.kcal + b.kcal, protein: r13(a.protein + b.protein), carbs: r13(a.carbs + b.carbs), fat: r13(a.fat + b.fat) });
+function gramsOf(food, qty, unit = food.units[0].unit) {
+  const u = food.units.find((x) => x.unit === unit) ?? (unit === food.base ? { grams: 1 } : void 0);
+  return u ? qty * u.grams : void 0;
+}
+function macrosOf(food, grams) {
+  const k = grams / 100;
+  return { kcal: Math.round(food.per100.kcal * k), protein: r13(food.per100.protein * k), carbs: r13(food.per100.carbs * k), fat: r13(food.per100.fat * k) };
+}
+function amountText(qty, unit) {
+  const n = +qty.toFixed(2);
+  if (unit === "g" || unit === "ml") return `${n} ${unit}`;
+  const plural = n <= 1 ? unit : unit.endsWith("s") ? unit : unit === "katori" ? "katoris" : `${unit}s`;
+  return `${n} ${plural}`;
+}
+var m = (id, slot, name, items, o = {}) => ({ id, slot, name, items, ...o });
+var MEALS = [
+  m("b-oats", "breakfast", "Oats with milk, banana & boiled eggs", [["oats", 50], ["milk-toned", 1], ["banana", 1], ["egg", 2]]),
+  m("b-bhurji", "breakfast", "Egg bhurji with roti & milk", [["egg", 3], ["oil", 1], ["roti", 2], ["milk-toned", 1]]),
+  m("b-poha", "breakfast", "Poha with boiled eggs & curd", [["poha", 1], ["egg", 2], ["curd", 1]]),
+  m("b-idli", "breakfast", "Idli, sambar & boiled eggs", [["idli", 4], ["sambar", 1], ["egg", 2]]),
+  m("b-toast", "breakfast", "Peanut-butter toast, milk & banana", [["bread", 3], ["peanut-butter", 2], ["milk-toned", 1], ["banana", 1]]),
+  m("l-chicken", "lunch", "Chicken curry, rice & dal", [["rice", 1.5], ["chicken-curry", 1], ["dal", 1], ["salad", 1]]),
+  m("l-dal-roti", "lunch", "Dal, roti, sabzi & curd", [["roti", 3], ["dal", 1.5], ["sabzi", 1], ["curd", 1]]),
+  m("l-soya", "lunch", "Soya chunks curry with roti & curd", [["soya-chunks", 40], ["sabzi", 1], ["roti", 3], ["curd", 1]]),
+  m("l-rajma", "lunch", "Rajma chawal with curd & eggs", [["rice", 1.5], ["rajma", 1], ["curd", 1], ["egg", 1]]),
+  m("l-fish", "lunch", "Fish curry, rice & sabzi", [["rice", 1.5], ["fish-curry", 1.5], ["sabzi", 1]]),
+  m("s-chana", "snacks", "Roasted chana & banana", [["roasted-chana", 1.5], ["banana", 1]]),
+  m("s-peanut-milk", "snacks", "Peanuts & a glass of milk", [["peanuts", 1], ["milk-toned", 1]]),
+  m("s-eggs", "snacks", "Boiled eggs & fruit", [["egg", 2], ["apple", 1]]),
+  m("s-curd", "snacks", "Curd with banana & peanuts", [["curd", 1.5], ["banana", 1], ["peanuts", 0.5]]),
+  m("s-milk-toast", "snacks", "Milk, banana & peanut-butter toast", [["milk-toned", 1], ["banana", 1], ["bread", 1], ["peanut-butter", 1]], { recovery: true }),
+  m("s-sattu", "snacks", "Sattu drink & banana", [["sattu", 40], ["banana", 1]], { recovery: true }),
+  m("s-curd-rice", "snacks", "Curd rice", [["rice", 1], ["curd", 1]], { recovery: true }),
+  m("d-chicken", "dinner", "Chicken, roti & sabzi", [["chicken-breast", 120], ["roti", 3], ["sabzi", 1]]),
+  m("d-egg-curry", "dinner", "Egg curry with rice", [["egg", 3], ["oil", 1], ["sabzi", 1], ["rice", 1.5]]),
+  m("d-paneer", "dinner", "Paneer bhurji with roti & salad", [["paneer", 100], ["roti", 3], ["salad", 1]]),
+  m("d-khichdi", "dinner", "Khichdi with curd & eggs", [["khichdi", 1.2], ["curd", 1], ["egg", 2]]),
+  m("d-fish", "dinner", "Fish with rice & dal", [["fish", 120], ["rice", 1.2], ["dal", 1]]),
+  m("p-banana-dates", "preGym", "Banana & dates", [["banana", 1], ["dates", 3]], { window: "under45" }),
+  m("p-honey-toast", "preGym", "Toast with honey", [["bread", 2], ["honey", 1]], { window: "under45" }),
+  m("p-curd-oats", "preGym", "Curd, banana & oats", [["curd", 1], ["banana", 1], ["oats", 30]], { window: "1to2h" }),
+  m("p-pb-toast", "preGym", "Peanut-butter toast & banana", [["bread", 2], ["peanut-butter", 1], ["banana", 1]], { window: "1to2h" }),
+  m("p-rice-dal", "preGym", "Rice, dal & boiled eggs", [["rice", 1], ["dal", 1], ["egg", 2]], { window: "2to3h" }),
+  m("p-poha", "preGym", "Poha & curd", [["poha", 1], ["curd", 1]], { window: "2to3h" })
+];
+
+// src/domain/schedule.ts
+var rotationOf = (plan, id) => plan.rotations.find((r) => r.id === id);
+var rotationCount = (instances, rotationId) => instances.filter((i) => i.rotationId === rotationId && i.status === "completed").length;
+function resolveSlot(plan, slot, instances, offset = 0) {
+  if ("templateId" in slot) return { templateId: slot.templateId };
+  const rot = rotationOf(plan, slot.rotationId);
+  if (!rot || !rot.templateIds.length) return void 0;
+  const n = rotationCount(instances, rot.id) + offset;
+  return { templateId: rot.templateIds[n % rot.templateIds.length], rotationId: rot.id };
+}
+var dayFor = (plan, date) => plan.days[weekdayIndex(date)] ?? {};
+
+// src/domain/nutrition.ts
+var MAIN_MEALS = ["breakfast", "lunch", "snacks", "dinner"];
+var MEAL_LABEL = { breakfast: "Breakfast", lunch: "Lunch", snacks: "Snacks", dinner: "Dinner", preGym: "Pre-gym" };
+var LIFESTYLE = {
+  low: { factor: 1.3, label: "Mostly sitting", sub: "Desk study or work, little walking" },
+  moderate: { factor: 1.4, label: "Some moving", sub: "Classes or work plus regular walking" },
+  high: { factor: 1.55, label: "On my feet", sub: "Active job or lots of walking" }
+};
+var emptyNutrition = () => ({ profile: {}, days: {} });
+function weighIns(d) {
+  const byDay = /* @__PURE__ */ new Map();
+  for (const m2 of d.bodyMetrics) if (m2.kind === "bodyweight" && Number.isFinite(m2.value) && m2.value > 0) byDay.set(m2.date, [...byDay.get(m2.date) ?? [], m2.value]);
+  return [...byDay].map(([date, v]) => ({ date, kg: sum(v) / v.length })).sort((a, b) => a.date.localeCompare(b.date));
+}
+var medianIn = (w, from, to) => {
+  const xs = w.filter((x) => x.date >= from && x.date <= to).map((x) => x.kg).sort((a, b) => a - b);
+  const m2 = xs.length >> 1;
+  return xs.length ? { kg: xs.length % 2 ? xs[m2] : (xs[m2 - 1] + xs[m2]) / 2, n: xs.length } : void 0;
+};
+function workingWeight(d, date) {
+  const w = weighIns(d).filter((x) => x.date <= date);
+  const week = medianIn(w, addDays(date, -6), date);
+  return week && week.n >= 3 ? week.kg : w.at(-1)?.kg;
+}
+function weightTrend(d, today) {
+  const w = weighIns(d).filter((x) => x.date <= today);
+  const latest = w.at(-1);
+  const recent = medianIn(w, addDays(today, -6), today);
+  const earlier = medianIn(w, addDays(today, -20), addDays(today, -14));
+  const weekKg = recent && recent.n >= 3 ? recent.kg : void 0;
+  if (!recent || !earlier || recent.n < 3 || earlier.n < 3) {
+    return { latest, weekKg, status: "need-data", suggestion: 0, note: "Weigh in at least 3 times a week, at the same time of day, for two weeks to see a trend. A single weigh-in moves with water, food and salt." };
+  }
+  const ratePerWeek = (recent.kg - earlier.kg) / 2;
+  const ratePct = ratePerWeek / earlier.kg * 100;
+  const status = ratePct < -0.1 ? "losing" : ratePct < 0.15 ? "slow" : ratePct <= 0.75 ? "on-track" : "fast";
+  const last = d.nutrition.profile.adjustments?.at(-1);
+  const waiting = !!last && daysBetween(last.date, today) < 14;
+  const raw = status === "losing" || status === "slow" ? 150 : status === "fast" ? -150 : 0;
+  const suggestion = waiting ? 0 : raw;
+  const note = status === "on-track" ? "Gaining at a steady, gradual rate \u2014 keep the target." : status === "fast" ? "Gaining faster than about 0.75% a week \u2014 likely more fat than muscle." : status === "slow" ? "Weight is about flat over two weeks." : "Weight is going down over two weeks.";
+  return { latest, weekKg, ratePerWeek, ratePct, status, suggestion, note: raw && waiting ? `${note} A change was made in the last 14 days \u2014 give it time first.` : note };
+}
+var minutesOf = (i, fallback) => {
+  const m2 = i.startedAt && i.completedAt ? (Date.parse(i.completedAt) - Date.parse(i.startedAt)) / 6e4 : NaN;
+  return Number.isFinite(m2) && m2 >= 10 && m2 <= 180 ? m2 : fallback;
+};
+function trainingKcal(d, date, kg2) {
+  const net = (met, minutes) => Math.round((met - 1) * kg2 * (minutes / 60));
+  const bb = d.basketball.filter((b) => b.date === date && b.durationMin > 0).map((b) => ({ kind: "basketball", minutes: b.durationMin, kcal: net(clamp(3 + 0.6 * b.rpe, 4.5, 9), b.durationMin) }));
+  const done = d.instances.filter((i) => i.date === date && i.status === "completed");
+  const gym = done.flatMap((i) => {
+    if (i.kind === "gym") {
+      const sets = i.exercises.flatMap((e) => e.sets).filter((s) => s.kind === "working").length;
+      const minutes2 = minutesOf(i, sets * 3);
+      return minutes2 ? [{ kind: "gym", minutes: minutes2, kcal: net(5, minutes2) }] : [];
+    }
+    const minutes = minutesOf(i, 20);
+    return [{ kind: "plyo", minutes, kcal: net(7, minutes) }];
+  });
+  return [...bb, ...gym];
+}
+var WINDOW = 14;
+function trainingAverage(d, date, kg2) {
+  const sessions = Array.from({ length: WINDOW }, (_, i) => trainingKcal(d, addDays(date, -i), kg2)).flat();
+  return { perDay: Math.round(sum(sessions.map((s) => s.kcal)) / WINDOW), sessions: sessions.length };
+}
+var ageOn = (p, date) => p.age === void 0 ? void 0 : p.age + (p.ageAsOf ? Math.max(0, Math.floor(daysBetween(p.ageAsOf, date) / 365.25)) : 0);
+var mifflin = (kg2, cm, age, sex) => 10 * kg2 + 6.25 * cm - 5 * age + (sex === "male" ? 5 : -161);
+function nutritionTargets(d, date) {
+  const p = d.nutrition.profile;
+  const age = ageOn(p, date);
+  const cm = d.profile.heightCm;
+  const kg2 = workingWeight(d, date);
+  const missing = [...age === void 0 ? ["age"] : [], ...!cm ? ["height"] : [], ...!kg2 ? ["weight"] : []];
+  if (missing.length || age === void 0 || !cm || !kg2) return { ok: false, missing };
+  const female = mifflin(kg2, cm, age, "female");
+  const male = mifflin(kg2, cm, age, "male");
+  const bmr = Math.round(p.sex === "male" ? male : p.sex === "female" ? female : (female + male) / 2);
+  const factor = LIFESTYLE[p.lifestyle ?? "moderate"].factor;
+  const training = trainingAverage(d, date, kg2);
+  const maintenance = Math.round(bmr * factor + training.perDay);
+  const surplus = clamp(roundTo(maintenance * 0.1, 50), 200, 400);
+  const adjustment = clamp(sum((p.adjustments ?? []).map((a) => a.kcal)), -600, 600);
+  const o = p.override ?? {};
+  const kcal = o.kcal ?? roundTo(maintenance + surplus + adjustment, 10);
+  const protein = o.protein ?? roundTo(1.8 * kg2, 5);
+  const fat = o.fat ?? roundTo(Math.max(0.25 * kcal / 9, 0.8 * kg2), 5);
+  const carbs = o.carbs ?? Math.max(0, roundTo((kcal - protein * 4 - fat * 9) / 4, 5));
+  const overridden = ["kcal", "protein", "carbs", "fat"].filter((k) => o[k] !== void 0);
+  const notes = [
+    "These are estimates, not prescriptions. Adjust them from your weight trend, training, hunger and recovery.",
+    `Resting energy (BMR) ${bmr} kcal from the Mifflin\u2013St Jeor equation, \xD7 ${factor} for daily life outside training.`,
+    ...p.sex ? [] : [`Sex isn\u2019t set, so BMR is the middle of the male and female equations (${Math.round(female)}\u2013${Math.round(male)} kcal). Add it in Nutrition profile for a closer estimate.`],
+    training.sessions ? `Training: ${training.sessions} logged session${training.sessions === 1 ? "" : "s"} in the last 14 days, about ${training.perDay} kcal a day on average. Planned sessions count once they\u2019re logged.` : "No training logged in the last 14 days, so none is added yet. It\u2019s added as you log sessions.",
+    `Gain: +${surplus} kcal a day (about 10% over maintenance) for a gradual gain of roughly 0.25\u20130.5% of bodyweight a week.`,
+    ...adjustment ? [`Includes ${adjustment > 0 ? "+" : ""}${adjustment} kcal from weight-trend adjustments you applied.`] : [],
+    "Protein 1.8 g per kg of bodyweight (common range for muscle gain: 1.6\u20132.2 g/kg); fat about 25% of calories; carbohydrate makes up the rest.",
+    ...overridden.length ? [`Your own value replaces APEX\u2019s for: ${overridden.map((k) => k === "kcal" ? "calories" : k).join(", ")}.`] : []
+  ];
+  return {
+    ok: true,
+    targets: {
+      kcal,
+      protein,
+      carbs,
+      fat,
+      bmr,
+      bmrRange: p.sex ? null : [Math.round(female), Math.round(male)],
+      lifestyleFactor: factor,
+      trainingPerDay: training.perDay,
+      trainingSessions: training.sessions,
+      maintenance,
+      surplus,
+      adjustment,
+      weightKg: +kg2.toFixed(1),
+      overridden,
+      notes
+    }
+  };
+}
+var DAY_LABEL = { gym: "Gym day", basketball: "Basketball day", combined: "Gym + basketball", rest: "Rest day" };
+function dayType(d, date, today) {
+  const inst = d.instances.filter((i) => i.date === date);
+  const plan = dayFor(d.plan, date);
+  const gymDone = inst.some((i) => i.status === "completed");
+  const gymOpen = inst.length ? inst.some((i) => i.status === "planned" || i.status === "active") : !!(plan.gym || plan.plyo);
+  const bbDone = d.basketball.some((b) => b.date === date);
+  const bbItem = plannedBasketball(d, date)?.item;
+  const ahead = date >= today;
+  const gym = gymDone || ahead && gymOpen;
+  const basketball = bbDone || ahead && !!bbItem;
+  const gymTime = itemsOn(d, weekdayIndex(date)).find((i) => i.kind === "gym")?.time ?? d.profile.gymTime;
+  return {
+    kind: gym && basketball ? "combined" : gym ? "gym" : basketball ? "basketball" : "rest",
+    gym: { planned: ahead && gymOpen, done: gymDone, ...gym && gymTime && { time: gymTime } },
+    basketball: { planned: ahead && !!bbItem, done: bbDone, ...bbItem?.time && { time: bbItem.time } }
+  };
+}
+var entriesOn = (d, date) => d.foodLog.filter((e) => e.date === date);
+var totalsOf = (entries) => entries.reduce((t, e) => addMacros(t, e), ZERO);
+function dayLog(d, date) {
+  const entries = entriesOn(d, date);
+  const byMeal = Object.fromEntries(["breakfast", "lunch", "snacks", "dinner", "preGym"].map((s) => [s, entries.filter((e) => e.meal === s)]));
+  return { entries, byMeal, totals: totalsOf(entries) };
+}
+var remaining = (target, eaten) => ({
+  kcal: target.kcal - eaten.kcal,
+  protein: +(target.protein - eaten.protein).toFixed(1),
+  carbs: +(target.carbs - eaten.carbs).toFixed(1),
+  fat: +(target.fat - eaten.fat).toFixed(1)
+});
+var SHARE_GYM = { breakfast: 0.24, lunch: 0.28, snacks: 0.14, dinner: 0.24, preGym: 0.1 };
+var SHARE_OTHER = { breakfast: 0.26, lunch: 0.3, snacks: 0.18, dinner: 0.26, preGym: 0 };
+var PIECES = /* @__PURE__ */ new Set(["egg", "white", "roti", "idli", "dosa", "slice", "banana", "apple", "orange", "date", "paratha", "potato"]);
+function roundQty(qty, unit) {
+  if (PIECES.has(unit)) return Math.max(1, Math.round(qty));
+  if (unit === "g" || unit === "ml") return Math.max(10, roundTo(qty, unit === "ml" ? 50 : 10));
+  return Math.max(0.5, roundTo(qty, 0.5));
+}
+var avoids = (food, avoid) => {
+  const words = [food.id, food.name, ...food.aliases ?? [], ...food.tags].map((x) => x.toLowerCase());
+  return avoid.some((a) => words.some((w) => w.includes(a.toLowerCase())));
+};
+function plannedMeal(t, target, eaten, options) {
+  const base = sum(t.items.map(([id, q]) => macrosOf(foodById(id), gramsOf(foodById(id), q)).kcal));
+  const k = t.slot === "preGym" ? clamp(target / base, 0.7, 1.5) : clamp(target / base, 0.6, 1.8);
+  const items = t.items.map(([id, q]) => {
+    const food = foodById(id);
+    const unit = food.units[0].unit;
+    const qty = roundQty(q * k, unit);
+    const grams = gramsOf(food, qty, unit);
+    return { foodId: id, name: food.name, qty, unit, grams, ...macrosOf(food, grams) };
+  });
+  return { slot: t.slot, id: t.id, name: t.name, items, target: Math.round(target), eaten, options, ...items.reduce((s, i) => addMacros(s, i), ZERO) };
+}
+function dayPlan(d, date, today, target) {
+  const day = dayType(d, date, today);
+  const p = d.nutrition.profile;
+  const choices = d.nutrition.days[date] ?? {};
+  const avoid = p.avoid ?? ["beef"];
+  const gymDay = day.kind === "gym" || day.kind === "combined";
+  const share = gymDay ? SHARE_GYM : SHARE_OTHER;
+  const entries = entriesOn(d, date);
+  const allowed = (t) => t.items.every(([id]) => {
+    const f2 = foodById(id);
+    return !!f2 && !avoids(f2, avoid) && (p.budget !== "budget" || f2.cost === 1);
+  });
+  const n = daysBetween("2026-01-05", date);
+  const pick = (slot, list) => {
+    if (!list.length) return void 0;
+    const i = ((n + (choices.swaps?.[slot] ?? 0)) % list.length + list.length) % list.length;
+    const t = list[i];
+    return plannedMeal(t, target.kcal * share[slot], entries.some((e) => e.plan === t.id && e.meal === slot), list.length);
+  };
+  const recovery = day.kind === "basketball" || day.kind === "combined";
+  const meals = MAIN_MEALS.flatMap((slot) => {
+    const all = MEALS.filter((t) => t.slot === slot && allowed(t));
+    const list = slot === "snacks" ? all.filter((t) => !!t.recovery === recovery) : all;
+    const meal = pick(slot, list.length ? list : all);
+    return meal ? [meal] : [];
+  });
+  const window = choices.preGym ?? "1to2h";
+  const pre = gymDay ? pick("preGym", MEALS.filter((t) => t.slot === "preGym" && t.window === window && allowed(t))) : void 0;
+  const totals = [...meals, ...pre ? [pre] : []].reduce((s, x) => addMacros(s, x), ZERO);
+  return { day, meals, ...pre && { preGym: { ...pre, window } }, totals, proteinGap: Math.max(0, Math.round(target.protein - totals.protein)) };
+}
+
 // src/domain/insights.ts
 var pct2 = (x) => Math.round(Math.abs(x) * 100);
 function loadChange(ctx, cfg) {
@@ -1872,18 +2223,6 @@ function generatePlyoInstance(t, plan, meta) {
     })
   };
 }
-
-// src/domain/schedule.ts
-var rotationOf = (plan, id) => plan.rotations.find((r) => r.id === id);
-var rotationCount = (instances, rotationId) => instances.filter((i) => i.rotationId === rotationId && i.status === "completed").length;
-function resolveSlot(plan, slot, instances, offset = 0) {
-  if ("templateId" in slot) return { templateId: slot.templateId };
-  const rot = rotationOf(plan, slot.rotationId);
-  if (!rot || !rot.templateIds.length) return void 0;
-  const n = rotationCount(instances, rot.id) + offset;
-  return { templateId: rot.templateIds[n % rot.templateIds.length], rotationId: rot.id };
-}
-var dayFor = (plan, date) => plan.days[weekdayIndex(date)] ?? {};
 
 // src/domain/seed.ts
 var SEED_GYM = [
@@ -2133,7 +2472,9 @@ function seedData(now) {
     recovery: [],
     bodyMetrics: [],
     performance: [],
-    records: []
+    records: [],
+    nutrition: emptyNutrition(),
+    foodLog: []
   };
 }
 
@@ -2203,6 +2544,14 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
     });
     emit();
   }
+  function setNutritionDay(date, day) {
+    const keep = addDays(today(), -60);
+    const days = Object.fromEntries(Object.entries({ ...data().nutrition.days, [date]: day }).filter(([k]) => k >= keep));
+    commit({ nutrition: { ...data().nutrition, days } });
+  }
+  function saveNutritionProfile(patch) {
+    commit({ nutrition: { ...data().nutrition, profile: cleanNutritionProfile({ ...data().nutrition.profile, ...patch }) } });
+  }
   const gymTemplate = (id) => data().templates.find((t) => t.id === id);
   const plyoTemplate = (id) => data().plyoTemplates.find((t) => t.id === id);
   const findInstance = (id) => data().instances.find((i) => i.id === id);
@@ -2219,14 +2568,14 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
   }
   function generate(kind, templateId, meta) {
     const ctx = buildContext(adaptationData(data()), meta.date);
-    const m = { id: meta.id, date: meta.date, now: meta.createdAt ?? now(), rotationId: meta.rotationId, plan: meta.plan, alternativeFor: meta.alternativeFor };
+    const m2 = { id: meta.id, date: meta.date, now: meta.createdAt ?? now(), rotationId: meta.rotationId, plan: meta.plan, alternativeFor: meta.alternativeFor };
     if (kind === "gym") {
       const t2 = gymTemplate(templateId);
-      return t2 && generateGymInstance(t2, adaptGym(t2, ctx, { alternatives: alternativesFrom(meta.date) }), m);
+      return t2 && generateGymInstance(t2, adaptGym(t2, ctx, { alternatives: alternativesFrom(meta.date) }), m2);
     }
     const t = plyoTemplate(templateId);
     const primerId = plyoTemplate(LOW_FATIGUE_PLYO_ID)?.id ?? data().plyoTemplates.find((p) => p.tag === "LOW FATIGUE")?.id;
-    return t && generatePlyoInstance(t, adaptPlyo(t, ctx, { primerId }), m);
+    return t && generatePlyoInstance(t, adaptPlyo(t, ctx, { primerId }), m2);
   }
   function refreshToday() {
     const date = today();
@@ -2531,12 +2880,12 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
           exercises = i.exercises.map((x) => x === e ? { ...x, ...identity } : x);
         } else {
           const kept = { ...e, prescribed: { ...e.prescribed, sets: Math.max(1, done) }, status: status(Math.max(1, done)) };
-          const remaining = Math.max(1, e.prescribed.sets - done);
+          const remaining2 = Math.max(1, e.prescribed.sets - done);
           const next = {
             ...e,
             ...identity,
             id: uid("ie"),
-            prescribed: { ...e.prescribed, sets: remaining },
+            prescribed: { ...e.prescribed, sets: remaining2 },
             status: "pending",
             supersetGroup: void 0,
             ...gym ? { templateSets: 0, sets: [] } : { template: null, logs: [] }
@@ -2774,6 +3123,88 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
       if (!validNumber(value, 0.1, 2e3)) return;
       commit({ performance: [...data().performance, { id: uid("pm"), date: today(), kind, value }] });
     },
+    // ---- nutrition (kept apart from training records; weight stays in the body log) ----
+    /** Nutrition profile; height, target weight and today's weigh-in go to the profile and body log. */
+    saveNutrition(input) {
+      const d = data();
+      const patch = {};
+      const p = cleanNutritionProfile({ ...d.nutrition.profile, ...input.profile });
+      if (!p.setupAt && p.age !== void 0) p.setupAt = now();
+      patch.nutrition = { ...d.nutrition, profile: p };
+      const prof = { ...d.profile };
+      if (validNumber(input.heightCm, 120, 230)) prof.heightCm = Math.round(input.heightCm);
+      if (validNumber(input.targetKg, 35, 200)) prof.targetBodyweightKg = +input.targetKg.toFixed(1);
+      if (prof.heightCm !== d.profile.heightCm || prof.targetBodyweightKg !== d.profile.targetBodyweightKg) patch.profile = prof;
+      if (validNumber(input.weightKg, 30, 250)) {
+        const last = [...d.bodyMetrics].reverse().find((m2) => m2.kind === "bodyweight");
+        if (!last || Math.abs(last.value - input.weightKg) >= 0.05 || last.date !== today()) {
+          patch.bodyMetrics = [...d.bodyMetrics, { id: uid("bm"), date: today(), kind: "bodyweight", value: +input.weightKg.toFixed(2) }];
+        }
+      }
+      commit(patch);
+    },
+    /** Logs a food from APEX's table (quantity in one of its units) or a custom one. Never a future day. */
+    logFood(input) {
+      const entry = foodEntry(input, today(), now());
+      if (entry) commit({ foodLog: [...data().foodLog, entry] });
+      return entry;
+    },
+    /** A new quantity: table foods are recalculated, custom ones scaled. */
+    updateFood(id, qty, unit) {
+      const e = data().foodLog.find((x) => x.id === id);
+      if (!e || !validNumber(qty, 0.1, 5e3)) return;
+      const food = e.foodId ? foodById(e.foodId) : void 0;
+      let next;
+      if (food) {
+        const u = unit ?? e.unit;
+        const grams = gramsOf(food, qty, u);
+        if (!grams || grams > 3e3) return;
+        next = { ...e, qty, unit: u, grams, ...macrosOf(food, grams) };
+      } else {
+        const k = qty / e.qty;
+        next = { ...e, qty, kcal: Math.round(e.kcal * k), protein: +(e.protein * k).toFixed(1), carbs: +(e.carbs * k).toFixed(1), fat: +(e.fat * k).toFixed(1) };
+      }
+      commit({ foodLog: data().foodLog.map((x) => x.id === id ? next : x) });
+    },
+    removeFood(id) {
+      if (data().foodLog.some((x) => x.id === id)) commit({ foodLog: data().foodLog.filter((x) => x.id !== id) });
+    },
+    /** Copies what was logged for a meal on one day to a meal on another (today or earlier). */
+    copyMeal(from, meal, to, toMeal = meal) {
+      if (to > today()) return 0;
+      const copies = data().foodLog.filter((e) => e.date === from && e.meal === meal).map(({ plan: _plan, ...e }) => ({ ...e, id: uid("food"), date: to, meal: toMeal, loggedAt: now() }));
+      if (copies.length) commit({ foodLog: [...data().foodLog, ...copies] });
+      return copies.length;
+    },
+    /** Logs today's suggestion for a meal as eaten — once; it counts only from here. */
+    eatSuggestion(date, slot) {
+      const d = data();
+      const t = nutritionTargets(d, date);
+      if (!t.ok || date > today()) return 0;
+      const plan = dayPlan(d, date, today(), t.targets);
+      const meal = slot === "preGym" ? plan.preGym : plan.meals.find((x) => x.slot === slot);
+      if (!meal || meal.eaten) return 0;
+      const entries = meal.items.flatMap((i) => foodEntry({ date, meal: slot, foodId: i.foodId, qty: i.qty, unit: i.unit, plan: meal.id }, today(), now()) ?? []);
+      commit({ foodLog: [...d.foodLog, ...entries] });
+      return entries.length;
+    },
+    /** Shows the next suggestion for a meal. The food log is untouched. */
+    swapSuggestion(date, slot) {
+      const day = data().nutrition.days[date] ?? {};
+      setNutritionDay(date, { ...day, swaps: { ...day.swaps, [slot]: (day.swaps?.[slot] ?? 0) + 1 } });
+    },
+    setPreGymWindow(date, window) {
+      if (!(window in PRE_GYM)) return;
+      setNutritionDay(date, { ...data().nutrition.days[date], preGym: window });
+    },
+    /** Applies the weight-trend change APEX currently suggests (±150 kcal), never anything else. */
+    applyTrendAdjustment() {
+      const d = data();
+      const s = weightTrend(d, today()).suggestion;
+      if (!s) return 0;
+      saveNutritionProfile({ adjustments: [...d.nutrition.profile.adjustments ?? [], { date: today(), kcal: s }] });
+      return s;
+    },
     updateSettings(patch) {
       commit({ settings: { ...data().settings, ...patch } });
     },
@@ -2790,6 +3221,46 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
     }
   };
   return api;
+}
+var PRE_GYM = { under45: true, "1to2h": true, "2to3h": true };
+var SLOTS = ["breakfast", "lunch", "snacks", "dinner", "preGym"];
+var ISO = /^\d{4}-\d{2}-\d{2}$/;
+function cleanNutritionProfile(p) {
+  const out = {};
+  if (p.setupAt) out.setupAt = p.setupAt;
+  if (validNumber(p.age, 13, 90)) {
+    out.age = Math.round(p.age);
+    out.ageAsOf = p.ageAsOf && ISO.test(p.ageAsOf) ? p.ageAsOf : void 0;
+  }
+  if (!out.ageAsOf) delete out.ageAsOf;
+  if (p.sex === "male" || p.sex === "female") out.sex = p.sex;
+  if (p.lifestyle === "low" || p.lifestyle === "moderate" || p.lifestyle === "high") out.lifestyle = p.lifestyle;
+  if (p.diet === "non-vegetarian") out.diet = p.diet;
+  if (Array.isArray(p.avoid)) out.avoid = [...new Set(p.avoid.filter((a) => typeof a === "string" && a.trim()).map((a) => a.trim().toLowerCase()))].slice(0, 20);
+  if (p.budget === "budget" || p.budget === "moderate") out.budget = p.budget;
+  const o = p.override ?? {};
+  const range2 = { kcal: [1200, 6e3], protein: [40, 400], carbs: [50, 900], fat: [20, 300] };
+  const override = Object.fromEntries(Object.keys(range2).filter((k) => validNumber(o[k], range2[k][0], range2[k][1])).map((k) => [k, Math.round(o[k])]));
+  if (Object.keys(override).length) out.override = override;
+  const adj = (p.adjustments ?? []).filter((a) => a && ISO.test(a.date) && validNumber(a.kcal, -300, 300));
+  if (adj.length) out.adjustments = adj.slice(-24);
+  return out;
+}
+function foodEntry(input, today, now) {
+  if (!ISO.test(input.date) || input.date > today || !SLOTS.includes(input.meal) || !validNumber(input.qty, 0.1, 5e3)) return void 0;
+  const base = { id: uid("food"), date: input.date, meal: input.meal, qty: input.qty, loggedAt: now, ...input.plan && { plan: input.plan } };
+  if (input.foodId) {
+    const food = foodById(input.foodId);
+    const unit = input.unit ?? food?.units[0].unit;
+    const grams = food && unit ? gramsOf(food, input.qty, unit) : void 0;
+    if (!food || !unit || !grams || grams > 3e3) return void 0;
+    return { ...base, foodId: food.id, name: food.name, unit, grams, ...macrosOf(food, grams) };
+  }
+  const c = input.custom;
+  const name = c?.name?.trim();
+  if (!c || !name || name.length > 60 || !validNumber(c.kcal, 0, 3e3)) return void 0;
+  const g = (v) => validNumber(v, 0, 300) ? +v.toFixed(1) : 0;
+  return { ...base, foodId: null, name, unit: "serving", grams: null, kcal: Math.round(c.kcal), protein: g(c.protein), carbs: g(c.carbs), fat: g(c.fat) };
 }
 function hydrate(loaded, now) {
   const seed = seedData(now);
@@ -3069,8 +3540,8 @@ var ACTIONS = {
 };
 function athleteClock(today, now = () => /* @__PURE__ */ new Date()) {
   const d = parseISODate(today);
-  const [y, m, day, wd] = [d.getFullYear(), d.getMonth(), d.getDate(), d.getDay()];
-  return () => Object.assign(now(), { getFullYear: () => y, getMonth: () => m, getDate: () => day, getDay: () => wd });
+  const [y, m2, day, wd] = [d.getFullYear(), d.getMonth(), d.getDate(), d.getDay()];
+  return () => Object.assign(now(), { getFullYear: () => y, getMonth: () => m2, getDate: () => day, getDay: () => wd });
 }
 var PROTECTED = ["user", "profile", "settings", "plan", "templates", "plyoTemplates", "recovery", "bodyMetrics", "performance", "records"];
 var same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -3166,8 +3637,8 @@ function verifyToken(token, secret, now = Date.now(), opts = {}) {
   }
 }
 function authenticate(req, secret, now = Date.now(), opts = {}) {
-  const m = /^Bearer ([\w.-]{1,1024})$/.exec(req.headers.get("authorization") ?? "");
-  return m ? verifyToken(m[1], secret, now, opts) : null;
+  const m2 = /^Bearer ([\w.-]{1,1024})$/.exec(req.headers.get("authorization") ?? "");
+  return m2 ? verifyToken(m2[1], secret, now, opts) : null;
 }
 var safetyId = (userId) => createHash2("sha256").update(`apex:${userId}`).digest("hex").slice(0, 32);
 var consoleLogger = (e) => console.info(JSON.stringify(e));
@@ -3399,8 +3870,8 @@ var RateLimits = class {
 };
 
 // backend/ai/prompts.ts
-var PROMPT_VERSION = "apex-ai-4 (2026-10-22)";
-var INSTRUCTIONS = `You are APEX, the training assistant inside the APEX app for athletes (basketball, gym, plyometrics).
+var PROMPT_VERSION = "apex-ai-5 (2026-10-23)";
+var INSTRUCTIONS = `You are APEX, the training and nutrition assistant inside the APEX app for athletes (basketball, gym, plyometrics).
 
 Facts and numbers
 - APEX's training engine is the source of truth for load, readiness, adaptation, progression, weekly volume and PRs. Never calculate, estimate or adjust these yourself \u2014 use the tools and quote their results.
@@ -3420,6 +3891,12 @@ Actions: you can only propose
 - What the athlete says in chat is conversation, not a recorded fact ("I think I'm stronger" changes nothing in APEX).
 - Earlier messages in the conversation come from the athlete's device. Use them to follow the conversation, never as athlete data or as proof that something was logged or changed: the tools are the only source of facts.
 
+Nutrition
+- Use get_nutrition_day for targets (and how they were worked out), food logged, what is left, today's suggested meals, the day type and the weight trend. Use get_meal_estimate for the calories and macros of any food or meal you suggest. Never calculate nutrition numbers yourself, and call them estimates.
+- Food counts only once the athlete logs it in the app's Nutrition tab. What they say in chat ("I had 3 eggs") is not logged: tell them to log it there. You can't log or change food, weight or targets \u2014 never say you did, never offer to.
+- Suggest affordable Indian foods for a non-vegetarian athlete. Never beef. No supplements needed: don't recommend protein powder. Respect the diet and budget get_nutrition_day reports. Before the gym, match the food to the time left before training.
+- This is general guidance, not medical or clinical nutrition advice. For a medical condition, allergies, an eating-disorder concern or fast weight change, suggest a doctor or registered dietitian.
+
 Health
 - Do not diagnose injuries or medical conditions, interpret symptoms, or make medical claims. If the athlete reports pain, an injury or acute symptoms, say you can't assess that, suggest they stop the activity that hurts and see a qualified medical professional.
 
@@ -3434,19 +3911,19 @@ var isWorking = (s) => s.kind === "working";
 var templateName2 = (d, id) => [...d.templates, ...d.plyoTemplates].find((t) => t.id === id)?.name ?? null;
 function setText(s, u, unit) {
   if (s.kind === "skipped") return "skipped";
-  const amount = unit === "sec" ? `${s.reps}s` : s.weight > 0 ? `${s.reps}` : `${s.reps} reps`;
-  return `${s.weight > 0 ? `${wtu(s.weight, u)} \xD7 ` : ""}${amount}${s.rir !== void 0 ? ` @ ${s.rir} RIR` : ""}${s.kind === "warmup" ? " (warm-up)" : ""}`;
+  const amount2 = unit === "sec" ? `${s.reps}s` : s.weight > 0 ? `${s.reps}` : `${s.reps} reps`;
+  return `${s.weight > 0 ? `${wtu(s.weight, u)} \xD7 ` : ""}${amount2}${s.rir !== void 0 ? ` @ ${s.rir} RIR` : ""}${s.kind === "warmup" ? " (warm-up)" : ""}`;
 }
 var EXERCISE = S.obj({ id: S.str(), name: S.str() });
 var EXERCISE_QUERY = S.text("^[^\\n]{1,80}$", 'The exercise as the athlete names it (e.g. "chest supported row"), or its APEX id');
-var norm = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+var norm2 = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 var LOOKUP = S.oneOf(["logged", "no_history", "ambiguous", "not_found"]);
 function findExercise(d, q) {
   const logged = (id) => exerciseHistory(d.instances, id).length > 0;
   if (hasGymExercise(q)) return { exercise: { id: q, name: gymExercise(q).name }, matches: [], lookup: logged(q) ? "logged" : "no_history" };
-  const n = norm(q);
+  const n = norm2(q);
   const named = [...d.templates.flatMap((t) => t.exercises.map((e) => ({ id: e.exerciseId, name: e.name }))), ...GYM_EXERCISES].filter((x) => hasGymExercise(x.id));
-  const pick = (f) => [...new Map(named.filter((x) => f(norm(x.name))).map((x) => [x.id, { id: x.id, name: gymExercise(x.id).name }])).values()];
+  const pick = (f2) => [...new Map(named.filter((x) => f2(norm2(x.name))).map((x) => [x.id, { id: x.id, name: gymExercise(x.id).name }])).values()];
   const words = n.split(" ").filter(Boolean);
   const exact = pick((x) => x === n);
   const hits = exact.length ? exact : words.length ? pick((x) => words.every((w) => x.includes(w)) || n.includes(x)) : [];
@@ -3541,7 +4018,7 @@ function decisionView(d, i, u) {
     unit: nul(x.unit),
     areas: (x.areas ?? []).map((a) => ({ area: a.area, band: a.band, change_pct: round(a.change * 100), preserved: a.preserved })),
     removed: x.removed ?? [],
-    modified: (x.modified ?? []).map((m) => ({ name: m.name, from: localize(m.from, u), to: localize(m.to, u) })),
+    modified: (x.modified ?? []).map((m2) => ({ name: m2.name, from: localize(m2.from, u), to: localize(m2.to, u) })),
     alternative: x.alternativeTemplateId ? templateName2(d, x.alternativeTemplateId) : null,
     readiness: nul(x.readiness),
     recent_sessions: x.inputs?.recent ?? [],
@@ -3558,6 +4035,9 @@ function programName(d, e) {
   return `${rot.name} rotation${next ? ` (next: ${templateName2(d, next.templateId)})` : ""}`;
 }
 var NONE = S.obj({});
+var MACROS = S.obj({ kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num() });
+var macros = (m2) => ({ kcal: round(m2.kcal), protein_g: round(m2.protein), carbs_g: round(m2.carbs), fat_g: round(m2.fat) });
+var NUTRITION_NOTE = `Estimates, not prescriptions or medical advice. ${FOOD_DATA_NOTE}`;
 var LOAD_NOTE = "Training load is APEX\u2019s internal programming number (arbitrary units), not a medical measure. Only logged sessions count.";
 var READ_TOOLS = [
   {
@@ -3584,7 +4064,7 @@ var READ_TOOLS = [
     run(d) {
       const p = d.profile;
       const u = unitsOf(d);
-      const bw = d.bodyMetrics.filter((m) => m.kind === "bodyweight").reduce((a, b) => !a || b.date >= a.date ? b : a, void 0);
+      const bw = d.bodyMetrics.filter((m2) => m2.kind === "bodyweight").reduce((a, b) => !a || b.date >= a.date ? b : a, void 0);
       const facts = profileFacts(d);
       return {
         source: "athlete_reported",
@@ -3852,14 +4332,14 @@ var READ_TOOLS = [
       best_e1rm: S.orNull(S.str())
     }),
     run(d, a) {
-      const f = findExercise(d, a.exercise);
-      if (!f.exercise) return { ...f, total_sessions: 0, sessions: [], best_set: null, best_e1rm: null };
+      const f2 = findExercise(d, a.exercise);
+      if (!f2.exercise) return { ...f2, total_sessions: 0, sessions: [], best_set: null, best_e1rm: null };
       const u = unitsOf(d);
-      const unit = gymExercise(f.exercise.id).unit;
-      const h = exerciseHistory(d.instances, f.exercise.id);
+      const unit = gymExercise(f2.exercise.id).unit;
+      const h = exerciseHistory(d.instances, f2.exercise.id);
       const b = exerciseBests(h);
       return {
-        ...f,
+        ...f2,
         total_sessions: h.length,
         sessions: h.slice(0, a.limit ?? 6).map((s) => ({ date: s.date, template: s.templateName, sets: s.sets.map((x) => setText(x, u, unit)), notes: nul(s.notes) })),
         best_set: b ? `${setText(b.best.set, u, unit)} on ${b.best.date}` : null,
@@ -3882,16 +4362,16 @@ var READ_TOOLS = [
       today_prescription: S.orNull(S.str())
     }),
     run(d, a, ctx) {
-      const f = findExercise(d, a.exercise);
-      if (!f.exercise) return { ...f, recommendation: null, based_on: null, on_today_plan: false, today_prescription: null };
+      const f2 = findExercise(d, a.exercise);
+      if (!f2.exercise) return { ...f2, recommendation: null, based_on: null, on_today_plan: false, today_prescription: null };
       const u = unitsOf(d);
-      const id = f.exercise.id;
+      const id = f2.exercise.id;
       const unit = gymExercise(id).unit;
       const h = exerciseHistory(d.instances, id);
       const live = liveExercise(d.instances, id, ctx.today);
       const rec = nextProgression(h, live, id, u);
       return {
-        ...f,
+        ...f2,
         recommendation: { action: rec.action, weight: rec.weight === void 0 ? null : wtu(rec.weight, u), reps: rec.reps, reason: localize(rec.reason, u) },
         based_on: h[0] ? { date: h[0].date, sets: h[0].sets.filter(isWorking).map((s) => setText(s, u, unit)) } : null,
         on_today_plan: !!live,
@@ -3915,12 +4395,12 @@ var READ_TOOLS = [
       records: S.list(S.obj({ date: S.str(), exercise: S.str(), kind: S.str(), detail: S.str() }))
     }),
     run(d, a) {
-      const f = a.exercise ? findExercise(d, a.exercise) : { exercise: null, matches: [], lookup: null };
-      if (a.exercise && !f.exercise) return { ...f, total: 0, records: [] };
+      const f2 = a.exercise ? findExercise(d, a.exercise) : { exercise: null, matches: [], lookup: null };
+      if (a.exercise && !f2.exercise) return { ...f2, total: 0, records: [] };
       const u = unitsOf(d);
-      const recs = d.records.filter((r) => !f.exercise || r.exerciseId === f.exercise.id).sort((x, y) => y.date.localeCompare(x.date));
+      const recs = d.records.filter((r) => !f2.exercise || r.exerciseId === f2.exercise.id).sort((x, y) => y.date.localeCompare(x.date));
       return {
-        ...f,
+        ...f2,
         total: recs.length,
         records: recs.slice(0, a.limit ?? 10).map((r) => ({ date: r.date, exercise: r.exerciseName, kind: PR_LABEL[r.kind], detail: localize(r.detail, u) }))
       };
@@ -3944,6 +4424,105 @@ var READ_TOOLS = [
         note: "Logged working sets; secondary muscles count half. A programming guide, not a measure of stimulus.",
         groups: muscleVolume(d.instances, ctx.today).map((g) => ({ group: g.group, sets: g.sets, target_low: g.target[0], target_high: g.target[1], sessions: g.frequency, status: g.status }))
       };
+    }
+  },
+  {
+    name: "get_nutrition_day",
+    access: "read",
+    description: "Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food the athlete logged and what is left, the day type, today\u2019s suggested meals (not eaten until logged), weight trend and diet preferences.",
+    input: S.obj({ date: S.orNull(S.text("^\\d{4}-\\d{2}-\\d{2}$", "YYYY-MM-DD; null = today")) }),
+    output: S.obj({
+      date: S.str(),
+      set_up: S.bool(),
+      missing: S.list(S.str()),
+      targets: S.orNull(MACROS),
+      basis: S.list(S.str()),
+      day_type: S.str(),
+      logged: S.list(S.obj({ meal: S.str(), food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() })),
+      eaten: MACROS,
+      remaining: S.orNull(MACROS),
+      suggested: S.list(S.obj({ meal: S.str(), name: S.str(), items: S.str(), kcal: S.num(), protein_g: S.num(), logged: S.bool() })),
+      weight: S.obj({ latest: S.orNull(S.str()), week_median: S.orNull(S.str()), target: S.orNull(S.str()), trend: S.str(), per_week: S.orNull(S.str()), suggestion_kcal: S.num(), note: S.str() }),
+      diet: S.str(),
+      note: S.str()
+    }),
+    run(d, a, ctx) {
+      const date = a.date ?? ctx.today;
+      if (date > ctx.today) throw new Error("future date");
+      const u = unitsOf(d);
+      const t = nutritionTargets(d, date);
+      const log = dayLog(d, date);
+      const day = dayType(d, date, ctx.today);
+      const plan = t.ok && date === ctx.today ? dayPlan(d, date, ctx.today, t.targets) : void 0;
+      const w = weightTrend(d, ctx.today);
+      const p = d.nutrition.profile;
+      return {
+        date,
+        set_up: !!p.setupAt,
+        missing: t.ok ? [] : t.missing,
+        targets: t.ok ? macros(t.targets) : null,
+        basis: t.ok ? t.targets.notes.slice(1) : [],
+        day_type: `${DAY_LABEL[day.kind]}${day.gym.done || day.basketball.done ? " (logged)" : day.kind === "rest" ? "" : " (planned)"}`,
+        logged: log.entries.slice(0, 40).map((e) => ({ meal: MEAL_LABEL[e.meal], food: e.name, amount: amountText(e.qty, e.unit), kcal: e.kcal, protein_g: round(e.protein) })),
+        eaten: macros(log.totals),
+        remaining: t.ok ? macros(remaining(t.targets, log.totals)) : null,
+        suggested: plan ? [...plan.meals, ...plan.preGym ? [plan.preGym] : []].map((m2) => ({
+          meal: m2.slot === "preGym" && plan.preGym ? `Pre-gym (${plan.preGym.window})` : MEAL_LABEL[m2.slot],
+          name: m2.name,
+          items: m2.items.map((i) => `${i.name}: ${amountText(i.qty, i.unit)}`).join("; "),
+          kcal: m2.kcal,
+          protein_g: round(m2.protein),
+          logged: m2.eaten
+        })) : [],
+        weight: {
+          latest: w.latest ? `${wtu(w.latest.kg, u)} on ${w.latest.date}` : null,
+          week_median: w.weekKg === void 0 ? null : wtu(w.weekKg, u),
+          target: d.profile.targetBodyweightKg === void 0 ? null : wtu(d.profile.targetBodyweightKg, u),
+          trend: w.status,
+          per_week: w.ratePerWeek === void 0 ? null : wtu(w.ratePerWeek, u),
+          suggestion_kcal: w.suggestion,
+          note: w.note
+        },
+        diet: `${p.diet ?? "non-vegetarian"}; never: ${(p.avoid ?? ["beef"]).join(", ")}; budget: ${p.budget ?? "moderate"}; no supplements required`,
+        note: NUTRITION_NOTE
+      };
+    }
+  },
+  {
+    name: "get_meal_estimate",
+    access: "read",
+    description: "Calories and macros for foods from APEX\u2019s food table (Indian staples). Use it for every number in a meal or food you suggest. Unknown foods come back with close matches.",
+    input: S.obj({
+      items: S.list(S.obj({
+        food: S.text("^[^\\n]{1,60}$", 'As the athlete would say it, e.g. "dal", "anda", "chicken curry"'),
+        quantity: S.orNull(S.num()),
+        unit: S.orNull(S.str('e.g. "egg", "katori", "roti", "g"; null = the food\u2019s usual unit'))
+      }), 12)
+    }),
+    output: S.obj({
+      items: S.list(S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
+      not_found: S.list(S.obj({ asked: S.str(), closest: S.list(S.str()) })),
+      total: MACROS,
+      note: S.str()
+    }),
+    run(_d, a) {
+      const items = [];
+      const missing = [];
+      let total = ZERO;
+      for (const x of a.items) {
+        const f2 = searchFoods(x.food, 1)[0];
+        const unit = x.unit === "g" || x.unit === "ml" ? f2?.base : x.unit && f2?.units.some((v) => v.unit === x.unit) ? x.unit : f2?.units[0].unit;
+        const qty = x.quantity !== null && x.quantity > 0 && x.quantity <= 5e3 ? x.quantity : f2?.serve;
+        const grams = f2 && unit && qty ? gramsOf(f2, qty, unit) : void 0;
+        if (!f2 || !grams || grams > 3e3) {
+          missing.push({ asked: x.food, closest: searchFoods(x.food.split(" ")[0], 3).map((c) => c.name) });
+          continue;
+        }
+        const m2 = macrosOf(f2, grams);
+        total = addMacros(total, m2);
+        items.push({ food: f2.name, amount: amountText(qty, unit), ...macros(m2), cost: f2.cost === 1 ? "budget" : "moderate" });
+      }
+      return { items, not_found: missing, total: macros(total), note: NUTRITION_NOTE };
     }
   }
 ];
@@ -4103,10 +4682,10 @@ var AIService = class {
    * (5xx, network), or a rate limit that clears within 5 s. A longer rate limit answers ai_busy at
    * once, with Retry-After, instead of waiting out the deadline.
    */
-  async call(model, messages, abort, remaining, userId, log) {
+  async call(model, messages, abort, remaining2, userId, log) {
     const { provider, limits } = this.deps.config;
     for (let attempt = 0; ; attempt++) {
-      if (remaining() <= 0 || abort.signal.aborted) throw new AIError("timeout");
+      if (remaining2() <= 0 || abort.signal.aborted) throw new AIError("timeout");
       let res;
       try {
         res = await this.deps.client.chat.completions.create(
@@ -4121,14 +4700,14 @@ var AIService = class {
             // gpt-oss: little reasoning — answers come from APEX's tools, and Groq's free tier counts every token
             .../gpt-oss/.test(model) && { reasoning_effort: "low" }
           },
-          { signal: abort.signal, timeout: remaining() }
+          { signal: abort.signal, timeout: remaining2() }
         );
       } catch (e) {
         const err = abort.signal.aborted ? new AIError("timeout") : classify(e);
         log({ event: "ai.model_error", category: err.category, model, ...!abort.signal.aborted && { upstream: upstreamFacts(e) } });
         const wait = err.code === "ai_busy" ? (err.retryAfter ?? 60) * 1e3 : 0;
         const transient = ["upstream_tool_call_failed", "upstream_unavailable", "upstream_network"].includes(err.category) || err.code === "ai_busy" && wait <= 5e3;
-        if (attempt > 0 || !transient || remaining() < wait + 1e4) throw err;
+        if (attempt > 0 || !transient || remaining2() < wait + 1e4) throw err;
         if (wait) await new Promise((r) => setTimeout(r, wait));
         continue;
       }
@@ -4396,7 +4975,7 @@ async function serve(req, deps, { corsOrigins = [], clientIp = "unknown" } = {})
   const out = await route(req, deps, { clientIp });
   return new Response(out.body, { status: out.status, headers: { ...Object.fromEntries(out.headers), ...cors } });
 }
-var scrub = (m) => String(m ?? "").replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, "<url>").replace(/\b(sk|rt|v1|dev1)[-_.][\w.-]{8,}/g, "<secret>").slice(0, 300);
+var scrub = (m2) => String(m2 ?? "").replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s'"]+/gi, "<url>").replace(/\b(sk|rt|v1|dev1)[-_.][\w.-]{8,}/g, "<secret>").slice(0, 300);
 var startupFailure = (e) => e instanceof ConfigError ? { event: "ai.config", problems: e.problems } : { event: "ai.startup_failed", category: e?.name ?? "error", code: e?.code, message: scrub(e?.message) };
 
 // backend/edge.ts

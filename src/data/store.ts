@@ -12,6 +12,7 @@ export interface KeyValueStore {
 
 export const DOCS = [
   'user', 'profile', 'settings', 'plan', 'templates', 'plyoTemplates', 'basketball', 'recovery', 'bodyMetrics', 'performance', 'records',
+  'nutrition', 'foodLog',
 ] as const satisfies readonly (keyof ApexData)[];
 export type Doc = (typeof DOCS)[number];
 export type Collection = Doc | 'instances';
@@ -55,7 +56,17 @@ const VALID: Record<Doc, (v: unknown) => boolean> = {
   bodyMetrics: listOfIds,
   performance: listOfIds,
   records: listOfIds,
+  nutrition: (v) => isObj(v) && isObj(v.profile) && isObj(v.days),
+  // ponytail: one document for every day's log (~3 KB a day); move to per-day keys like sessions before it nears Android's ~2 MB per entry
+  foodLog: listOfIds,
 };
+
+const MEAL_SLOTS = ['breakfast', 'lunch', 'snacks', 'dinner', 'preGym'];
+const amount = (v: unknown, max: number) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max;
+/** A logged food the totals can trust: a known meal, a date, and finite, plausible numbers. */
+export const validFoodEntry = (v: unknown) =>
+  isObj(v) && typeof v.id === 'string' && typeof v.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v.date) && MEAL_SLOTS.includes(v.meal as string) &&
+  typeof v.name === 'string' && amount(v.kcal, 5000) && amount(v.protein, 500) && amount(v.carbs, 1000) && amount(v.fat, 500) && amount(v.qty, 10000);
 
 export const validInstance = (v: unknown): v is SessionInstance =>
   hasId(v) && isObj(v) && Array.isArray(v.exercises) && isObj(v.decision) && typeof v.date === 'string' &&
@@ -92,7 +103,7 @@ export async function loadData(store: KeyValueStore): Promise<Loaded> {
     if (p.ok && VALID[c](p.value)) {
       const v = p.value;
       // drop individual malformed rows rather than the whole list
-      (out as Record<string, unknown>)[c] = Array.isArray(v) && c !== 'recovery' ? v.filter(hasId) : v;
+      (out as Record<string, unknown>)[c] = c === 'foodLog' ? (v as unknown[]).filter(validFoodEntry) : Array.isArray(v) && c !== 'recovery' ? v.filter(hasId) : v;
     } else {
       recovered.push(c);
       await backup(c, raws[i]!);

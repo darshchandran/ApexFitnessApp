@@ -56,12 +56,15 @@ function model(messages: Item[]): Item[] {
     if (text.startsWith('Log basketball')) return [call('propose_log_basketball', { duration_min: 90, rpe: 8, session_type: null, lower_body_fatigue: null, date: null })];
     if (text.startsWith('Can you reduce')) return [call('propose_adapt_today_workout', { session: 'gym', choice: 'adapt' })];
     if (text.startsWith('How did that')) return [call('get_recent_sessions', { days: 1 }, 1), call('get_current_adaptation', {}, 2)];
+    if (text.startsWith('How much protein')) return [call('get_nutrition_day', { date: null })];
     return [msg('Hello.')];
   }
   const userAt = messages.map((m) => m.role).lastIndexOf('user');
   const outputs = messages.slice(userAt).filter((m) => m.role === 'tool').map((m) => JSON.parse(String(m.content)));
   const proposal = outputs.find((o) => o.status);
   if (proposal) return [msg(proposal.status === 'awaiting_confirmation' ? `${proposal.summary} Confirm it in the app.` : `I can’t: ${proposal.reason}`)];
+  const day = outputs.find((o) => o.eaten);
+  if (day) return [msg(day.targets ? `Logged so far: ${day.eaten.protein_g} g of your ${day.targets.protein_g} g protein (estimates).` : 'Set up Nutrition first.')];
   const recent = outputs.find((o) => o.days);
   const adaptation = outputs.find((o) => o.sessions);
   return [msg(`Logged today: ${recent.days.flatMap((d: { sessions: { name: string }[] }) => d.sessions.map((s) => s.name)).join(', ')}. ${adaptation.sessions[0].headline}`)];
@@ -160,7 +163,7 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
     expect(seen).toHaveLength(2);
     expect(seen[0].auth).toBe(`Bearer ${API_KEY}`); // the server's Groq key goes to the provider…
     // Groq's Chat Completions endpoint, with nothing OpenAI-only in the request
-    expect(seen.every((s) => s.path === '/openai/v1/chat/completions' && s.body.tools.length === 14 && !('store' in s.body) && !('safety_identifier' in s.body))).toBe(true);
+    expect(seen.every((s) => s.path === '/openai/v1/chat/completions' && s.body.tools.length === 16 && !('store' in s.body) && !('safety_identifier' in s.body))).toBe(true);
     expect(JSON.stringify(seen)).not.toContain(SECRET); // …the athlete's token never does
     expect(snapshot(app)).toEqual(before); // proposing changed nothing
 
@@ -191,6 +194,23 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
       { role: 'assistant', content: confirmed.json.message },
       { role: 'user', content: 'How did that affect today’s workout?' },
     ]);
+  });
+});
+
+describe('nutrition over HTTP', () => {
+  it('answers from the athlete’s own logged food — each athlete sees only their own; chat logs nothing', async () => {
+    const mine = await device();
+    mine.saveNutrition({ profile: { age: 20, ageAsOf: TODAY }, heightCm: 178, targetKg: 75, weightKg: 68 });
+    mine.logFood({ date: TODAY, meal: 'breakfast', foodId: 'egg', qty: 3 });
+    const theirs = await device();
+    const before = snapshot(mine);
+    const a = await chat(apex.url, mine, 'How much protein have I had today?', 'athlete_n1', 'conv-n1');
+    expect(a.status).toBe(200);
+    expect(a.json).toMatchObject({ tools_used: ['get_nutrition_day'], action_required: false, message: 'Logged so far: 19 g of your 120 g protein (estimates).' });
+    const b = await chat(apex.url, theirs, 'How much protein have I had today?', 'athlete_n2', 'conv-n2');
+    expect(b.json.message).toBe('Set up Nutrition first.');
+    expect(snapshot(mine)).toEqual(before); // asking changes nothing
+    expect((await post(apex.url, '/ai/chat', { message: 'How much protein have I had today?', context: { today: TODAY, athlete_data: snapshot(mine) } }, null)).status).toBe(401);
   });
 });
 
@@ -376,6 +396,6 @@ describe('logs', () => {
   it('stay free of keys, tokens and athlete content', () => {
     const text = JSON.stringify(logs);
     expect(logs.some((l) => l.event === 'ai.action' && l.op === 'confirm')).toBe(true);
-    for (const s of [API_KEY, SECRET, 'athlete_1', 'Log basketball for', 'Bearer']) expect(text).not.toContain(s);
+    for (const s of [API_KEY, SECRET, 'athlete_1', 'Log basketball for', 'Bearer', 'protein', 'Egg (whole)', 'breakfast']) expect(text).not.toContain(s);
   });
 });

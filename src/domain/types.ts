@@ -1,4 +1,5 @@
 // Core domain entities. Pure data — no React, no persistence.
+import type { FoodEntry, NutritionData } from './nutrition';
 import type { AthleteProfile } from './profile';
 
 export type ISODate = string; // YYYY-MM-DD (local)
@@ -383,4 +384,8 @@ export interface ApexData {
   bodyMetrics: BodyMetric[];
   performance: PerformanceMetric[];
   records: PersonalRecord[];
+  /** Nutrition profile and planner choices (kept apart from training records). */
+  nutrition: NutritionData;
+  /** Food the athlete logged — only this counts as eaten. */
+  foodLog: FoodEntry[];
 }

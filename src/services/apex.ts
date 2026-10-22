@@ -1,6 +1,8 @@
 // Application layer: owns state, runs domain logic, persists every change.
 // No React here — the hook lives in useApex.ts.
 import { adaptGym, adaptPlyo } from '../domain/adaptation';
+import { foodById, gramsOf, macrosOf, type MealSlot, type PreGymWindow } from '../domain/foods';
+import { dayPlan, nutritionTargets, weightTrend, type FoodEntry, type NutritionProfile } from '../domain/nutrition';
 import { insights } from '../domain/insights';
 import { buildContext, computeStrain } from '../domain/strain';
 import { muscleVolume } from '../domain/volume';
@@ -103,6 +105,18 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
       if (patch.instances) await writeInstances(store, next.instances, prev.instances);
     });
     emit();
+  }
+
+  // ---------- nutrition helpers ----------
+
+  function setNutritionDay(date: ISODate, day: ApexData['nutrition']['days'][string]) {
+    const keep = addDays(today(), -60); // planner choices are only needed for recent days
+    const days = Object.fromEntries(Object.entries({ ...data().nutrition.days, [date]: day }).filter(([k]) => k >= keep));
+    commit({ nutrition: { ...data().nutrition, days } });
+  }
+
+  function saveNutritionProfile(patch: NutritionProfile) {
+    commit({ nutrition: { ...data().nutrition, profile: cleanNutritionProfile({ ...data().nutrition.profile, ...patch }) } });
   }
 
   // ---------- generation ----------
@@ -771,6 +785,98 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
       commit({ performance: [...data().performance, { id: uid('pm'), date: today(), kind, value }] });
     },
 
+    // ---- nutrition (kept apart from training records; weight stays in the body log) ----
+
+    /** Nutrition profile; height, target weight and today's weigh-in go to the profile and body log. */
+    saveNutrition(input: { profile?: NutritionProfile; heightCm?: number; targetKg?: number; weightKg?: number }) {
+      const d = data();
+      const patch: Partial<ApexData> = {};
+      const p = cleanNutritionProfile({ ...d.nutrition.profile, ...input.profile });
+      if (!p.setupAt && p.age !== undefined) p.setupAt = now();
+      patch.nutrition = { ...d.nutrition, profile: p };
+      const prof = { ...d.profile };
+      if (validNumber(input.heightCm, 120, 230)) prof.heightCm = Math.round(input.heightCm);
+      if (validNumber(input.targetKg, 35, 200)) prof.targetBodyweightKg = +input.targetKg.toFixed(1);
+      if (prof.heightCm !== d.profile.heightCm || prof.targetBodyweightKg !== d.profile.targetBodyweightKg) patch.profile = prof;
+      if (validNumber(input.weightKg, 30, 250)) {
+        const last = [...d.bodyMetrics].reverse().find((m) => m.kind === 'bodyweight');
+        if (!last || Math.abs(last.value - input.weightKg) >= 0.05 || last.date !== today()) {
+          patch.bodyMetrics = [...d.bodyMetrics, { id: uid('bm'), date: today(), kind: 'bodyweight', value: +input.weightKg.toFixed(2) }];
+        }
+      }
+      commit(patch);
+    },
+
+    /** Logs a food from APEX's table (quantity in one of its units) or a custom one. Never a future day. */
+    logFood(input: { date: ISODate; meal: MealSlot; foodId?: string; qty: number; unit?: string; custom?: { name: string; kcal: number; protein?: number; carbs?: number; fat?: number }; plan?: string }): FoodEntry | undefined {
+      const entry = foodEntry(input, today(), now());
+      if (entry) commit({ foodLog: [...data().foodLog, entry] });
+      return entry;
+    },
+
+    /** A new quantity: table foods are recalculated, custom ones scaled. */
+    updateFood(id: string, qty: number, unit?: string) {
+      const e = data().foodLog.find((x) => x.id === id);
+      if (!e || !validNumber(qty, 0.1, 5000)) return;
+      const food = e.foodId ? foodById(e.foodId) : undefined;
+      let next: FoodEntry | undefined;
+      if (food) {
+        const u = unit ?? e.unit;
+        const grams = gramsOf(food, qty, u);
+        if (!grams || grams > 3000) return;
+        next = { ...e, qty, unit: u, grams, ...macrosOf(food, grams) };
+      } else {
+        const k = qty / e.qty;
+        next = { ...e, qty, kcal: Math.round(e.kcal * k), protein: +(e.protein * k).toFixed(1), carbs: +(e.carbs * k).toFixed(1), fat: +(e.fat * k).toFixed(1) };
+      }
+      commit({ foodLog: data().foodLog.map((x) => (x.id === id ? next! : x)) });
+    },
+
+    removeFood(id: string) {
+      if (data().foodLog.some((x) => x.id === id)) commit({ foodLog: data().foodLog.filter((x) => x.id !== id) });
+    },
+
+    /** Copies what was logged for a meal on one day to a meal on another (today or earlier). */
+    copyMeal(from: ISODate, meal: MealSlot, to: ISODate, toMeal: MealSlot = meal) {
+      if (to > today()) return 0;
+      const copies = data().foodLog.filter((e) => e.date === from && e.meal === meal).map(({ plan: _plan, ...e }) => ({ ...e, id: uid('food'), date: to, meal: toMeal, loggedAt: now() }));
+      if (copies.length) commit({ foodLog: [...data().foodLog, ...copies] });
+      return copies.length;
+    },
+
+    /** Logs today's suggestion for a meal as eaten — once; it counts only from here. */
+    eatSuggestion(date: ISODate, slot: MealSlot) {
+      const d = data();
+      const t = nutritionTargets(d, date);
+      if (!t.ok || date > today()) return 0;
+      const plan = dayPlan(d, date, today(), t.targets);
+      const meal = slot === 'preGym' ? plan.preGym : plan.meals.find((x) => x.slot === slot);
+      if (!meal || meal.eaten) return 0;
+      const entries = meal.items.flatMap((i) => foodEntry({ date, meal: slot, foodId: i.foodId, qty: i.qty, unit: i.unit, plan: meal.id }, today(), now()) ?? []);
+      commit({ foodLog: [...d.foodLog, ...entries] });
+      return entries.length;
+    },
+
+    /** Shows the next suggestion for a meal. The food log is untouched. */
+    swapSuggestion(date: ISODate, slot: MealSlot) {
+      const day = data().nutrition.days[date] ?? {};
+      setNutritionDay(date, { ...day, swaps: { ...day.swaps, [slot]: (day.swaps?.[slot] ?? 0) + 1 } });
+    },
+
+    setPreGymWindow(date: ISODate, window: PreGymWindow) {
+      if (!(window in PRE_GYM)) return;
+      setNutritionDay(date, { ...data().nutrition.days[date], preGym: window });
+    },
+
+    /** Applies the weight-trend change APEX currently suggests (±150 kcal), never anything else. */
+    applyTrendAdjustment() {
+      const d = data();
+      const s = weightTrend(d, today()).suggestion;
+      if (!s) return 0;
+      saveNutritionProfile({ adjustments: [...(d.nutrition.profile.adjustments ?? []), { date: today(), kcal: s }] });
+      return s;
+    },
+
     updateSettings(patch: Partial<Settings>) {
       commit({ settings: { ...data().settings, ...patch } });
     },
@@ -789,6 +895,48 @@ export function createApex(store: KeyValueStore, clock: () => Date = () => new D
     },
   };
   return api;
+}
+
+const PRE_GYM: Record<PreGymWindow, true> = { under45: true, '1to2h': true, '2to3h': true };
+const SLOTS: MealSlot[] = ['breakfast', 'lunch', 'snacks', 'dinner', 'preGym'];
+const ISO = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Only valid values survive; anything else is dropped (targets fall back to APEX's). */
+export function cleanNutritionProfile(p: NutritionProfile): NutritionProfile {
+  const out: NutritionProfile = {};
+  if (p.setupAt) out.setupAt = p.setupAt;
+  if (validNumber(p.age, 13, 90)) { out.age = Math.round(p.age); out.ageAsOf = p.ageAsOf && ISO.test(p.ageAsOf) ? p.ageAsOf : undefined; }
+  if (!out.ageAsOf) delete out.ageAsOf;
+  if (p.sex === 'male' || p.sex === 'female') out.sex = p.sex;
+  if (p.lifestyle === 'low' || p.lifestyle === 'moderate' || p.lifestyle === 'high') out.lifestyle = p.lifestyle;
+  if (p.diet === 'non-vegetarian') out.diet = p.diet;
+  if (Array.isArray(p.avoid)) out.avoid = [...new Set(p.avoid.filter((a) => typeof a === 'string' && a.trim()).map((a) => a.trim().toLowerCase()))].slice(0, 20);
+  if (p.budget === 'budget' || p.budget === 'moderate') out.budget = p.budget;
+  const o = p.override ?? {};
+  const range = { kcal: [1200, 6000], protein: [40, 400], carbs: [50, 900], fat: [20, 300] } as const;
+  const override = Object.fromEntries((Object.keys(range) as (keyof typeof range)[]).filter((k) => validNumber(o[k], range[k][0], range[k][1])).map((k) => [k, Math.round(o[k]!)]));
+  if (Object.keys(override).length) out.override = override;
+  const adj = (p.adjustments ?? []).filter((a) => a && ISO.test(a.date) && validNumber(a.kcal, -300, 300));
+  if (adj.length) out.adjustments = adj.slice(-24);
+  return out;
+}
+
+/** A food-log entry from validated input, with its numbers worked out now — or undefined. */
+export function foodEntry(input: { date: ISODate; meal: MealSlot; foodId?: string; qty: number; unit?: string; custom?: { name: string; kcal: number; protein?: number; carbs?: number; fat?: number }; plan?: string }, today: ISODate, now: string): FoodEntry | undefined {
+  if (!ISO.test(input.date) || input.date > today || !SLOTS.includes(input.meal) || !validNumber(input.qty, 0.1, 5000)) return undefined;
+  const base = { id: uid('food'), date: input.date, meal: input.meal, qty: input.qty, loggedAt: now, ...(input.plan && { plan: input.plan }) };
+  if (input.foodId) {
+    const food = foodById(input.foodId);
+    const unit = input.unit ?? food?.units[0].unit;
+    const grams = food && unit ? gramsOf(food, input.qty, unit) : undefined;
+    if (!food || !unit || !grams || grams > 3000) return undefined;
+    return { ...base, foodId: food.id, name: food.name, unit, grams, ...macrosOf(food, grams) };
+  }
+  const c = input.custom;
+  const name = c?.name?.trim();
+  if (!c || !name || name.length > 60 || !validNumber(c.kcal, 0, 3000)) return undefined;
+  const g = (v: number | undefined) => (validNumber(v, 0, 300) ? +v.toFixed(1) : 0);
+  return { ...base, foodId: null, name, unit: 'serving', grams: null, kcal: Math.round(c.kcal), protein: g(c.protein), carbs: g(c.carbs), fat: g(c.fat) };
 }
 
 export type Apex = ReturnType<typeof createApex>;

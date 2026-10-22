@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react';
 import { LayoutAnimation, Platform, Pressable, StyleSheet, Text, UIManager, View } from 'react-native';
-import Svg, { Circle } from 'react-native-svg';
+import Svg, { Circle, Polyline } from 'react-native-svg';
 
 import { gymExercise, plyoExercise } from '@/domain/catalog';
 import type { Units } from '@/domain/profile';
@@ -15,6 +15,22 @@ import { bandLabel, bandTone, C, F, R, S } from './theme';
 
 if (Platform.OS === 'android') UIManager.setLayoutAnimationEnabledExperimental?.(true);
 export const animateLayout = () => LayoutAnimation.configureNext(LayoutAnimation.create(200, 'easeInEaseOut', 'opacity'));
+
+// ---------- Sparkline ----------
+
+export function Sparkline({ values, width = 120, height = 36 }: { values: number[]; width?: number; height?: number }) {
+  if (values.length < 2) return null;
+  const lo = Math.min(...values);
+  const hi = Math.max(...values);
+  const pts = values.map((v, i) => [(i / (values.length - 1)) * (width - 6) + 3, height - 3 - ((v - lo) / (hi - lo || 1)) * (height - 6)]);
+  const last = pts[pts.length - 1];
+  return (
+    <Svg width={width} height={height}>
+      <Polyline points={pts.map((p) => p.join(',')).join(' ')} stroke={C.text2} strokeWidth={1.5} fill="none" />
+      <Circle cx={last[0]} cy={last[1]} r={3} fill={C.accent} />
+    </Svg>
+  );
+}
 
 // ---------- ProgressRing ----------
 

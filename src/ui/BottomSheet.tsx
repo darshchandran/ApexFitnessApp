@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Animated, Easing, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { IconButton, Txt } from './primitives';
+import { Button, Chip, IconButton, Stepper, Txt } from './primitives';
 import { C, GUTTER, R, S } from './theme';
 
 export function BottomSheet({ visible, onClose, title, children, footer }: {
@@ -39,6 +39,21 @@ export function BottomSheet({ visible, onClose, title, children, footer }: {
         </Animated.View>
       </KeyboardAvoidingView>
     </Modal>
+  );
+}
+
+/** A quick number to log (a body metric, a jump test); several kinds get a picker. */
+export function LogSheet({ title, options, onSave, onClose }: { title: string; options: { kind: string; label: string; unit: string; initial: number }[]; onSave: (kind: string, v: number) => void; onClose: () => void }) {
+  const [kind, setKind] = useState(options[0].kind);
+  const opt = options.find((o) => o.kind === kind)!;
+  const [value, setValue] = useState(opt.initial);
+  return (
+    <BottomSheet visible onClose={onClose} title={title} footer={<Button label="Save" disabled={!(value > 0)} onPress={() => { onSave(kind, value); onClose(); }} />}>
+      {options.length > 1 && <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: S.lg }}>
+        {options.map((o) => <Chip key={o.kind} label={o.label} selected={o.kind === kind} onPress={() => { setKind(o.kind); setValue(o.initial); }} style={{ flexBasis: '30%', flexGrow: 1 }} />)}
+      </View>}
+      <Stepper label={opt.label} unit={opt.unit} value={value} step={opt.unit === 'kg' ? 0.1 : opt.unit === 'lb' ? 0.2 : 0.5} min={0} max={opt.unit === 'kg' ? 400 : opt.unit === 'lb' ? 880 : 500} onChange={setValue} />
+    </BottomSheet>
   );
 }
 

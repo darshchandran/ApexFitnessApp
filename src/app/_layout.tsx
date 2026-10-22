@@ -24,7 +24,7 @@ const theme = {
 const COLLECTION_LABEL: Record<string, string> = {
   templates: 'gym templates', plyoTemplates: 'plyometric templates', plan: 'weekly plan', instances: 'some sessions',
   basketball: 'practice log', records: 'records', settings: 'settings', user: 'profile', recovery: 'check-ins',
-  bodyMetrics: 'body log', performance: 'jump tests',
+  bodyMetrics: 'body log', performance: 'jump tests', nutrition: 'nutrition settings', foodLog: 'food log',
 };
 
 /** Quiet, persistent notices for storage problems. Never a stack trace. */
@@ -118,6 +118,8 @@ export default function RootLayout() {
             <Stack.Screen name="exercise/[id]" options={{ animation: 'slide_from_right' }} />
             <Stack.Screen name="settings" options={{ animation: 'slide_from_right' }} />
             <Stack.Screen name="ai" options={{ animation: 'slide_from_right' }} />
+            <Stack.Screen name="food" options={{ presentation: 'modal', animation: 'slide_from_bottom' }} />
+            <Stack.Screen name="nutrition-profile" options={{ animation: 'slide_from_right' }} />
           </Stack>
           <StorageNotice />
         </View>

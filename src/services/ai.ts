@@ -5,6 +5,7 @@
 // (applyActionChanges). Nothing here logs — no tokens, no athlete data, no message text.
 import type { KeyValueStore } from '../data/store';
 import type { ApexData, ISODate } from '../domain/types';
+import { addDays } from '../domain/util';
 import { createSession, memorySecrets, SessionError, type SecretStore } from './aiSession';
 import type { ActionChanges } from './apex';
 
@@ -16,6 +17,8 @@ const MAX_TEXT = 4000; // per stored message
 const MAX_REPLY = 20_000; // a reply this long is still shown in full until it is stored
 const CHAT_TIMEOUT = 45_000;
 /** What a question may carry of the conversation (backend/ai/config.ts → historyTurns, maxHistoryChars). */
+/** Days of food log sent with a question. */
+export const FOOD_DAYS = 14;
 export const HISTORY_TURNS = 8;
 export const HISTORY_CHARS = 4000;
 const HISTORY_ITEM = 1000; // each earlier message, cut to its start (answers lead with the point)
@@ -314,7 +317,13 @@ export function createAssistant(deps: {
     }
   }
 
-  const context = () => ({ today: deps.apex.today(), athlete_data: deps.apex.getState().data });
+  /** The athlete's data for this request. Food: the last 14 days only — older logs stay on the device. */
+  const context = () => {
+    const today = deps.apex.today();
+    const data = deps.apex.getState().data;
+    const from = addDays(today, -(FOOD_DAYS - 1));
+    return { today, athlete_data: { ...data, foodLog: data.foodLog.filter((e) => e.date >= from) } };
+  };
 
   async function deliver(userId: string): Promise<boolean> {
     const gen = generation;
