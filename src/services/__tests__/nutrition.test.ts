@@ -20,7 +20,7 @@ const plan = (a: A) => {
   if (!t.ok) throw new Error('no targets');
   return dayPlan(d(a), TODAY, TODAY, t.targets);
 };
-const setUp = (a: A) => a.saveNutrition({ profile: { age: 20, ageAsOf: TODAY, lifestyle: 'moderate', avoid: ['beef'] }, heightCm: 178, targetKg: 75, weightKg: 68 });
+const setUp = (a: A) => a.saveNutrition({ profile: { age: 24, ageAsOf: TODAY, lifestyle: 'moderate', avoid: ['beef'] }, heightCm: 183, targetKg: 79, weightKg: 72 });
 
 describe('nutrition setup', () => {
   it('stores the profile; height and target go to the athlete profile, weight to the body log', async () => {
@@ -28,9 +28,9 @@ describe('nutrition setup', () => {
     await apex.init();
     expect(nutritionTargets(d(apex), TODAY)).toEqual({ ok: false, missing: ['age', 'height', 'weight'] });
     setUp(apex);
-    expect(d(apex).nutrition.profile).toMatchObject({ age: 20, lifestyle: 'moderate', avoid: ['beef'], setupAt: expect.any(String) });
-    expect(d(apex).profile).toMatchObject({ heightCm: 178, targetBodyweightKg: 75 });
-    expect(d(apex).bodyMetrics).toEqual([expect.objectContaining({ date: TODAY, kind: 'bodyweight', value: 68 })]);
+    expect(d(apex).nutrition.profile).toMatchObject({ age: 24, lifestyle: 'moderate', avoid: ['beef'], setupAt: expect.any(String) });
+    expect(d(apex).profile).toMatchObject({ heightCm: 183, targetBodyweightKg: 79 });
+    expect(d(apex).bodyMetrics).toEqual([expect.objectContaining({ date: TODAY, kind: 'bodyweight', value: 72 })]);
     setUp(apex); // saving again doesn't add a second identical weigh-in
     expect(d(apex).bodyMetrics).toHaveLength(1);
     apex.saveNutrition({ profile: { ...d(apex).nutrition.profile, age: 500, sex: 'other' as never, lifestyle: 'extreme' as never } });

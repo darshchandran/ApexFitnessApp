@@ -11,7 +11,7 @@ import { BottomSheet } from '@/ui/BottomSheet';
 import { AFTER, FOCUS, GOALS, SLOTS, SPORTS, slotLabel } from '@/ui/context';
 import { Icon } from '@/ui/Icon';
 import { goBack } from '@/ui/nav';
-import { ApexCard, Button, Divider, IconButton, Segmented, Txt } from '@/ui/primitives';
+import { ApexCard, Button, Divider, IconButton, NumberField, Segmented, Txt } from '@/ui/primitives';
 import { DayEditor, dayActivities } from '@/ui/schedule';
 import { Expandable } from '@/ui/training';
 import { useUnits, wtu } from '@/ui/units';
@@ -34,28 +34,6 @@ function Field<T extends string>({ label, hint, options, value, onChange, wrap }
       <Segmented label={label} options={options.map((o) => o.value)} value={value} onChange={onChange} columns={wrap ? 3 : undefined}
         format={(v) => options.find((o) => o.value === v)!.label.toUpperCase()} height={44} />
       {hint ? <Txt v="bodySm" style={{ marginTop: 6 }}>{hint}</Txt> : null}
-    </View>
-  );
-}
-
-/** An optional number: blank = not set. Saved when it's a sensible value. */
-function NumberField({ label, unit, value, min, max, onSave }: { label: string; unit: string; value?: number; min: number; max: number; onSave: (v: number | undefined) => void }) {
-  const [text, setText] = useState(value === undefined ? '' : String(+value.toFixed(1)));
-  // saved as soon as it is a sensible value (or cleared); a half-typed number waits
-  const save = (t: string) => {
-    const v = Number(t.replace(',', '.'));
-    if (t.trim() === '') onSave(undefined);
-    else if (Number.isFinite(v) && v >= min && v <= max) onSave(v);
-    else return false;
-    return true;
-  };
-  const commit = () => { if (!save(text)) setText(value === undefined ? '' : String(+value.toFixed(1))); };
-  return (
-    <View style={styles.numRow}>
-      <Txt v="body" style={{ flex: 1 }}>{label}</Txt>
-      <TextInput value={text} onChangeText={(t) => { const clean = t.replace(/[^0-9.,]/g, ''); setText(clean); save(clean); }} onBlur={commit} onSubmitEditing={commit} keyboardType="decimal-pad" returnKeyType="done"
-        placeholder="—" placeholderTextColor={C.text3} maxLength={6} style={styles.numInput} accessibilityLabel={`${label} in ${unit}`} />
-      <Txt v="label" style={{ width: 28 }}>{unit}</Txt>
     </View>
   );
 }
@@ -224,7 +202,5 @@ const styles = StyleSheet.create({
   program: { flexDirection: 'row', alignItems: 'center', gap: S.md, padding: S.lg, borderRadius: R.lg, backgroundColor: C.surface, borderWidth: StyleSheet.hairlineWidth, borderColor: C.line },
   dayRow: { flexDirection: 'row', alignItems: 'center', gap: S.md, paddingHorizontal: S.lg, minHeight: 52, paddingVertical: S.sm },
   row: { flexDirection: 'row', alignItems: 'center', gap: S.md, padding: S.lg, minHeight: 64 },
-  numRow: { flexDirection: 'row', alignItems: 'center', gap: S.md, minHeight: 52 },
-  numInput: { width: 84, height: 44, borderRadius: R.sm, backgroundColor: C.raised, color: C.text, paddingHorizontal: S.md, fontFamily: F.display, fontSize: 20, textAlign: 'right' },
   link: { minHeight: 44, justifyContent: 'center' },
 });

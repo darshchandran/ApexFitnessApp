@@ -3,8 +3,8 @@ import { StyleSheet, View } from 'react-native';
 
 import { amountText, FOOD_DATA_NOTE, type MealSlot, type PreGymWindow } from '@/domain/foods';
 import {
-  DAY_LABEL, dayLog, dayPlan, dayType, MAIN_MEALS, MEAL_LABEL, nutritionTargets, remaining, STARTING_PROFILE, totalsOf, weighIns, weightTrend,
-  WINDOW_LABEL, type DayType, type FoodEntry, type PlannedMeal, type TrendStatus,
+  DAY_LABEL, dayLog, dayPlan, dayType, MAIN_MEALS, MEAL_LABEL, nutritionTargets, remaining, targetsGap, totalsOf, weighIns, weightTrend,
+  WINDOW_LABEL, type DayType, type FoodEntry, type PlannedMeal, type TargetsGap, type TrendStatus,
 } from '@/domain/nutrition';
 import { fromUnits, toUnits } from '@/domain/profile';
 import { addDays } from '@/domain/util';
@@ -25,6 +25,14 @@ const WINDOW_NOTE: Record<PreGymWindow, string> = {
 };
 const TREND_LABEL: Record<TrendStatus, string> = { 'need-data': 'Not enough data', losing: 'Losing', slow: 'Slow', 'on-track': 'On track', fast: 'Too fast' };
 const g = (n: number) => `${Math.round(n)}`;
+
+/** Why there is no target for the day, in words (not set up: the setup card says so). */
+function gapText(gap: Exclude<TargetsGap, { kind: 'setup' }>, date: string) {
+  if (gap.kind === 'missing') return `No targets: add your ${gap.missing.join(' and ')} in your nutrition profile.`;
+  return gap.first
+    ? `No targets for ${shortDate(date)}: they use a weigh-in on or before the day, and your first is ${shortDate(gap.first)}. What you ate still counts.`
+    : 'No targets yet: log your weight to see them.';
+}
 
 function dayDetail(day: DayType, past: boolean) {
   const part = (name: string, s: DayType['gym']) => (s.done ? `${name} logged` : s.planned ? `${name} planned` : '') + (s.time && (s.done || s.planned) ? ` · ${s.time}` : '');
@@ -96,6 +104,7 @@ export default function Nutrition() {
 
   const target = t.ok ? t.targets : undefined;
   const left = target && remaining(target, log.totals);
+  const gap = targetsGap(data, t, date);
   const current = trend.weekKg ?? trend.latest?.kg;
   const goal = data.profile.targetBodyweightKg;
   const start = weights[0]?.kg;
@@ -123,37 +132,43 @@ export default function Nutrition() {
         <ApexCard style={{ marginTop: S.xl, gap: S.sm }}>
           <Txt v="h3">Set up nutrition</Txt>
           <Txt v="bodySm">
-            APEX estimates calorie and macro targets from your age, height, weight and training. It starts from what you told it — {STARTING_PROFILE.age}, {STARTING_PROFILE.heightCm} cm,{' '}
-            {STARTING_PROFILE.weightKg} kg, aiming for about {STARTING_PROFILE.targetKg} kg — and you can change any of it.
+            APEX estimates calorie and macro targets from your age, height, weight and training. Enter them once — they stay on this device — and change them any time.
           </Txt>
           <Button label="Set up" onPress={go.nutritionProfile} style={{ marginTop: S.sm }} />
         </ApexCard>
       )}
 
-      {target && left && (
+      {/* what was eaten always shows; without targets for the day, the card says why */}
+      {(target || setUp || log.entries.length > 0) && (
         <>
           <SectionHeader title="Calories" action="How it’s worked out" onAction={go.nutritionProfile} />
           <ApexCard style={{ gap: S.lg }}>
-            <View style={[styles.row, { alignItems: 'center', gap: S.xl }]}>
-              <ProgressRing size={116} value={log.totals.kcal / target.kcal} label={`${log.totals.kcal} of ${target.kcal} kcal eaten`}>
-                <Txt v="num">{Math.abs(left.kcal)}</Txt>
-                <Txt v="overline">{left.kcal >= 0 ? 'kcal left' : 'kcal over'}</Txt>
-              </ProgressRing>
-              <View style={{ flex: 1, gap: S.md }}>
-                <Metric label="Eaten" value={log.totals.kcal} unit="kcal" />
-                <Metric label="Target" value={target.kcal} unit="kcal" sub={target.overridden.includes('kcal') ? 'Your own target' : `Maintenance ~${target.maintenance} + ${target.surplus + target.adjustment} gain`} />
+            {target && left ? (
+              <View style={[styles.row, { alignItems: 'center', gap: S.xl }]}>
+                <ProgressRing size={116} value={log.totals.kcal / target.kcal} label={`${log.totals.kcal} of ${target.kcal} kcal eaten`}>
+                  <Txt v="num">{Math.abs(left.kcal)}</Txt>
+                  <Txt v="overline">{left.kcal >= 0 ? 'kcal left' : 'kcal over'}</Txt>
+                </ProgressRing>
+                <View style={{ flex: 1, gap: S.md }}>
+                  <Metric label="Eaten" value={log.totals.kcal} unit="kcal" />
+                  <Metric label="Target" value={target.kcal} unit="kcal" sub={target.overridden.includes('kcal') ? 'Your own target' : `Maintenance ~${target.maintenance} + ${target.surplus + target.adjustment} gain`} />
+                </View>
               </View>
-            </View>
+            ) : (
+              <Metric label="Eaten" value={log.totals.kcal} unit="kcal" />
+            )}
             {(['protein', 'carbs', 'fat'] as const).map((k) => (
-              <View key={k} style={{ gap: 6 }} accessible accessibilityLabel={`${k}: ${g(log.totals[k])} of ${target[k]} grams`}>
+              <View key={k} style={{ gap: 6 }} accessible accessibilityLabel={target ? `${k}: ${g(log.totals[k])} of ${target[k]} grams` : `${k}: ${g(log.totals[k])} grams eaten`}>
                 <View style={styles.between}>
                   <Txt v="label" color={C.text}>{k === 'protein' ? 'Protein' : k === 'carbs' ? 'Carbs' : 'Fat'}</Txt>
-                  <Txt v="label">{g(log.totals[k])} / {target[k]} g</Txt>
+                  <Txt v="label">{g(log.totals[k])}{target ? ` / ${target[k]}` : ''} g</Txt>
                 </View>
-                <ProgressBar value={log.totals[k] / target[k]} color={k === 'protein' ? C.accent : C.text} height={5} />
+                {target && <ProgressBar value={log.totals[k] / target[k]} color={k === 'protein' ? C.accent : C.text} height={5} />}
               </View>
             ))}
-            <Txt v="bodySm" color={C.text3}>Estimates, not prescriptions — adjust them from your weight trend, training and recovery. Suggestions don’t count until you log them.</Txt>
+            {!gap ? (
+              <Txt v="bodySm" color={C.text3}>Estimates, not prescriptions — adjust them from your weight trend, training and recovery. Suggestions don’t count until you log them.</Txt>
+            ) : gap.kind !== 'setup' && <Txt v="bodySm" color={C.text}>{gapText(gap, date)}</Txt>}
           </ApexCard>
         </>
       )}
@@ -207,7 +222,7 @@ export default function Nutrition() {
       <Txt v="bodySm" color={C.text3} style={{ marginTop: S.sm }}>General guidance for a healthy athlete, not medical advice. With a medical condition or an eating concern, check with a doctor or a registered dietitian.</Txt>
 
       {weighing && (
-        <LogSheet title="Log weight" options={[{ kind: 'bodyweight', label: 'Bodyweight', unit: u, initial: +toUnits(weights.at(-1)?.kg ?? STARTING_PROFILE.weightKg, u).toFixed(1) }]}
+        <LogSheet title="Log weight" options={[{ kind: 'bodyweight', label: 'Bodyweight', unit: u, initial: +toUnits(weights.at(-1)?.kg ?? 80, u).toFixed(1) }]}
           onSave={(_, v) => apex.addBodyMetric('bodyweight', fromUnits(v, u))} onClose={() => setWeighing(false)} />
       )}
     </Screen>

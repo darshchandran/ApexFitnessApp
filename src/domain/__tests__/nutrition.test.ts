@@ -2,18 +2,18 @@ import { describe, expect, it } from '@jest/globals';
 import { memoryStore } from '../../data/store';
 import { createApex } from '../../services/apex';
 import { amountText, FOODS, foodById, gramsOf, macrosOf, MEALS, searchFoods } from '../foods';
-import { dayPlan, dayType, mifflin, nutritionTargets, roundQty, STARTING_PROFILE, totalsOf, trainingAverage, weightTrend, type FoodEntry } from '../nutrition';
+import { dayLog, dayPlan, dayType, mifflin, nutritionTargets, roundQty, targetsGap, totalsOf, trainingAverage, weightTrend, type FoodEntry } from '../nutrition';
 import type { ApexData } from '../types';
 import { addDays, weekdayIndex } from '../util';
 
-// Wed 7 Oct 2026: Legs on the program
+// Wed 7 Oct 2026: Legs on the program. A synthetic athlete: 24, 183 cm, 72 kg, aiming for 79 kg.
 const NOW = new Date(2026, 9, 7, 9);
 const TODAY = '2026-10-07';
 
 async function athlete(edit?: (a: ReturnType<typeof createApex>) => void) {
   const a = createApex(memoryStore(), () => NOW);
   await a.init();
-  a.saveNutrition({ profile: { age: 20, ageAsOf: TODAY, lifestyle: 'moderate', diet: 'non-vegetarian', avoid: ['beef'], budget: 'moderate' }, heightCm: 178, targetKg: 75, weightKg: 68 });
+  a.saveNutrition({ profile: { age: 24, ageAsOf: TODAY, lifestyle: 'moderate', diet: 'non-vegetarian', avoid: ['beef'], budget: 'moderate' }, heightCm: 183, targetKg: 79, weightKg: 72 });
   edit?.(a);
   return a;
 }
@@ -57,30 +57,29 @@ describe('the food table', () => {
 });
 
 describe('calorie and macro targets', () => {
-  it('the starting profile: a labelled estimate while sex isn’t set — maintenance, a modest surplus, macros', async () => {
+  it('a set-up athlete: a labelled estimate while sex isn’t set — maintenance, a modest surplus, macros', async () => {
     const t = targetsOf(data(await athlete()));
-    const female = mifflin(68, 178, 20, 'female');
-    const male = mifflin(68, 178, 20, 'male');
+    const female = mifflin(72, 183, 24, 'female');
+    const male = mifflin(72, 183, 24, 'male');
     expect(t.bmrRange).toEqual([Math.round(female), Math.round(male)]);
     expect(t.bmr).toBe(Math.round((female + male) / 2));
     expect(t.maintenance).toBe(Math.round(t.bmr * 1.4)); // no training logged yet
     expect(t.surplus).toBe(250); // ~10%, within 200–400
     expect(t.kcal).toBe(Math.round((t.maintenance + t.surplus) / 10) * 10);
-    expect(t.protein).toBe(120); // 1.8 g/kg × 68 kg, to 5 g
+    expect(t.protein).toBe(130); // 1.8 g/kg × 72 kg, to 5 g
     expect(t.fat).toBe(70); // ~25% of calories
     expect(t.carbs * 4 + t.protein * 4 + t.fat * 9).toBeLessThanOrEqual(t.kcal + 20);
     expect(t.notes.join(' ')).toMatch(/estimates[\s\S]*Sex isn’t set[\s\S]*No training logged/);
-    expect(STARTING_PROFILE).toMatchObject({ age: 20, heightCm: 178, weightKg: 68, targetKg: 75, avoid: ['beef'] });
   });
 
   it('with sex set it uses that equation; nothing is calculated without age, height or a weight', async () => {
     const a = await athlete();
     a.saveNutrition({ profile: { ...data(a).nutrition.profile, sex: 'male' } });
-    expect(targetsOf(data(a))).toMatchObject({ bmr: Math.round(mifflin(68, 178, 20, 'male')), bmrRange: null });
+    expect(targetsOf(data(a))).toMatchObject({ bmr: Math.round(mifflin(72, 183, 24, 'male')), bmrRange: null });
     const fresh = createApex(memoryStore(), () => NOW);
     await fresh.init();
     expect(nutritionTargets(data(fresh), TODAY)).toEqual({ ok: false, missing: ['age', 'height', 'weight'] });
-    fresh.saveNutrition({ profile: { age: 20 }, heightCm: 178 });
+    fresh.saveNutrition({ profile: { age: 24 }, heightCm: 183 });
     expect(nutritionTargets(data(fresh), TODAY)).toEqual({ ok: false, missing: ['weight'] });
   });
 
@@ -89,13 +88,13 @@ describe('calorie and macro targets', () => {
     // basketball is on the schedule today but not logged: nothing is added
     const planned = await athlete((a) => a.updateProfile({ schedule: [{ id: 's1', day: 2, kind: 'basketball', time: 'evening', durationMin: 90, enabled: true }] }));
     expect(targetsOf(data(planned)).maintenance).toBe(base.maintenance);
-    // a logged 90-minute game (RPE 8): ≈ (7.8 − 1) MET × 68 kg × 1.5 h, spread over 14 days
+    // a logged 90-minute game (RPE 8): ≈ (7.8 − 1) MET × 72 kg × 1.5 h, spread over 14 days
     const logged = await athlete((a) => a.logBasketball({ durationMin: 90, rpe: 8, sessionType: 'game' } as never));
     const t = targetsOf(data(logged));
     expect(t.trainingSessions).toBe(1);
-    expect(t.trainingPerDay).toBe(Math.round(Math.round(6.8 * 68 * 1.5) / 14));
-    expect(t.maintenance - base.maintenance).toBe(t.trainingPerDay); // smoothed: not +694 on the day
-    expect(trainingAverage(data(logged), addDays(TODAY, 14), 68).sessions).toBe(0); // gone after 14 days
+    expect(t.trainingPerDay).toBe(Math.round(Math.round(6.8 * 72 * 1.5) / 14));
+    expect(t.maintenance - base.maintenance).toBe(t.trainingPerDay); // smoothed: not +734 on the day
+    expect(trainingAverage(data(logged), addDays(TODAY, 14), 72).sessions).toBe(0); // gone after 14 days
     // targets move gently: the day after, the same training gives the same target
     expect(Math.abs(targetsOf(data(logged), addDays(TODAY, 1)).kcal - t.kcal)).toBeLessThanOrEqual(10);
   });
@@ -112,6 +111,26 @@ describe('calorie and macro targets', () => {
     const b = targetsOf(data(a));
     expect(b.adjustment).toBe(300);
     expect(b.notes.join(' ')).toMatch(/\+300 kcal from weight-trend adjustments/);
+  });
+});
+
+describe('a day without targets', () => {
+  it('says why — not set up, no weigh-in yet on or before the day, or a missing value — and the day’s food still counts', async () => {
+    const fresh = createApex(memoryStore(), () => NOW);
+    await fresh.init();
+    expect(targetsGap(data(fresh), nutritionTargets(data(fresh), TODAY), TODAY)).toEqual({ kind: 'setup' });
+    // set up today, with today's weigh-in: the day before has no weight to work from
+    const a = await athlete();
+    const before = addDays(TODAY, -1);
+    expect(nutritionTargets(data(a), before)).toEqual({ ok: false, missing: ['weight'] });
+    expect(targetsGap(data(a), nutritionTargets(data(a), before), before)).toEqual({ kind: 'no-weigh-in', first: TODAY });
+    expect(targetsGap(data(a), nutritionTargets(data(a), TODAY), TODAY)).toBeUndefined();
+    const noWeights = { ...data(a), bodyMetrics: [] };
+    expect(targetsGap(noWeights, nutritionTargets(noWeights, TODAY), TODAY)).toEqual({ kind: 'no-weigh-in' });
+    const noHeight = { ...data(a), profile: { ...data(a).profile, heightCm: undefined } };
+    expect(targetsGap(noHeight, nutritionTargets(noHeight, TODAY), TODAY)).toEqual({ kind: 'missing', missing: ['height'] });
+    a.logFood({ date: before, meal: 'lunch', foodId: 'dal', qty: 1 });
+    expect(dayLog(data(a), before).totals).toMatchObject({ kcal: 165, protein: 9.8 });
   });
 });
 
@@ -182,20 +201,20 @@ describe('weight trend', () => {
   };
 
   it('needs two weekly averages — a single weigh-in never moves the target', async () => {
-    expect(weightTrend(await weighing([[0, 70]]), TODAY)).toMatchObject({ status: 'need-data', suggestion: 0 });
+    expect(weightTrend(await weighing([[0, 74]]), TODAY)).toMatchObject({ status: 'need-data', suggestion: 0 });
     // one heavy day (water, salt) doesn't change the steady trend
-    const steady: [number, number][] = [[1, 68.4], [2, 68.4], [4, 68.4], [14, 68], [16, 68], [18, 68]];
+    const steady: [number, number][] = [[1, 72.4], [2, 72.4], [4, 72.4], [14, 72], [16, 72], [18, 72]];
     expect(weightTrend(await weighing(steady), TODAY)).toMatchObject({ status: 'on-track', suggestion: 0 });
-    expect(weightTrend(await weighing([[0, 70.5], ...steady]), TODAY)).toMatchObject({ status: 'on-track', suggestion: 0, latest: { kg: 70.5 } });
+    expect(weightTrend(await weighing([[0, 74.5], ...steady]), TODAY)).toMatchObject({ status: 'on-track', suggestion: 0, latest: { kg: 74.5 } });
   });
 
   it('on track at ~0.25–0.5% a week; flat → +150 kcal; too fast → −150 kcal; nothing within 14 days of a change', async () => {
     const week = (now: number, then: number): [number, number][] => [[0, now], [2, now], [4, now], [14, then], [16, then], [18, then]];
-    expect(weightTrend(await weighing(week(68.4, 68)), TODAY)).toMatchObject({ status: 'on-track', suggestion: 0 }); // +0.2 kg/wk
-    const flat = weightTrend(await weighing(week(68, 68)), TODAY);
+    expect(weightTrend(await weighing(week(72.4, 72)), TODAY)).toMatchObject({ status: 'on-track', suggestion: 0 }); // +0.2 kg/wk
+    const flat = weightTrend(await weighing(week(72, 72)), TODAY);
     expect(flat).toMatchObject({ status: 'slow', suggestion: 150, ratePerWeek: 0 });
-    expect(weightTrend(await weighing(week(69.6, 68)), TODAY)).toMatchObject({ status: 'fast', suggestion: -150 });
-    const changed = await weighing(week(68, 68));
+    expect(weightTrend(await weighing(week(73.6, 72)), TODAY)).toMatchObject({ status: 'fast', suggestion: -150 });
+    const changed = await weighing(week(72, 72));
     changed.nutrition = { ...changed.nutrition, profile: { ...changed.nutrition.profile, adjustments: [{ date: addDays(TODAY, -5), kcal: 150 }] } };
     expect(weightTrend(changed, TODAY)).toMatchObject({ status: 'slow', suggestion: 0, note: expect.stringMatching(/give it time/) });
   });

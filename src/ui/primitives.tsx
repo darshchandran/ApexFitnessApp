@@ -287,6 +287,28 @@ export function Chip({ label, selected, onPress, style }: { label: string; selec
   );
 }
 
+/** An optional number: blank = not set. Saved when it's a sensible value. */
+export function NumberField({ label, unit, value, min, max, onSave }: { label: string; unit: string; value?: number; min: number; max: number; onSave: (v: number | undefined) => void }) {
+  const [text, setText] = useState(value === undefined ? '' : String(+value.toFixed(1)));
+  // saved as soon as it is a sensible value (or cleared); a half-typed number waits
+  const save = (t: string) => {
+    const v = Number(t.replace(',', '.'));
+    if (t.trim() === '') onSave(undefined);
+    else if (Number.isFinite(v) && v >= min && v <= max) onSave(v);
+    else return false;
+    return true;
+  };
+  const commit = () => { if (!save(text)) setText(value === undefined ? '' : String(+value.toFixed(1))); };
+  return (
+    <View style={styles.numRow}>
+      <Txt v="body" style={{ flex: 1 }}>{label}</Txt>
+      <TextInput value={text} onChangeText={(t) => { const clean = t.replace(/[^0-9.,]/g, ''); setText(clean); save(clean); }} onBlur={commit} onSubmitEditing={commit} keyboardType="decimal-pad" returnKeyType="done"
+        placeholder="—" placeholderTextColor={C.text3} maxLength={6} style={styles.numInput} accessibilityLabel={`${label} in ${unit}`} />
+      <Txt v="label" style={{ width: 28 }}>{unit}</Txt>
+    </View>
+  );
+}
+
 export function ListRow({ title, subtitle, right, onPress, left, accessibilityLabel }: {
   title: string; subtitle?: string; right?: ReactNode; onPress?: () => void; left?: ReactNode; accessibilityLabel?: string;
 }) {
@@ -336,6 +358,8 @@ export const styles = StyleSheet.create({
   seg: { borderRadius: R.sm, backgroundColor: C.raised, borderWidth: StyleSheet.hairlineWidth, borderColor: C.line, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 4 },
   segText: { fontFamily: F.semibold, fontSize: 14, color: C.text, letterSpacing: 0.3 },
   listRow: { flexDirection: 'row', alignItems: 'center', gap: S.md, paddingVertical: S.md, paddingHorizontal: S.lg, minHeight: 60 },
+  numRow: { flexDirection: 'row', alignItems: 'center', gap: S.md, minHeight: 52 },
+  numInput: { width: 84, height: 44, borderRadius: R.sm, backgroundColor: C.raised, color: C.text, paddingHorizontal: S.md, fontFamily: F.display, fontSize: 20, textAlign: 'right' },
   empty: { alignItems: 'center', gap: S.sm, paddingVertical: S.xxl, paddingHorizontal: S.lg, borderRadius: R.lg, borderWidth: 1, borderColor: C.line, borderStyle: 'dashed' },
   emptyIcon: { width: 40, height: 40, borderRadius: 20, borderWidth: 1, borderColor: C.line, alignItems: 'center', justifyContent: 'center', marginBottom: S.xs },
 });

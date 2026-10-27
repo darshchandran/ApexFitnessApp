@@ -2,45 +2,48 @@ import { useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { ageOn, LIFESTYLE, nutritionTargets, STARTING_PROFILE, weighIns, type Lifestyle, type NutritionProfile, type Sex } from '@/domain/nutrition';
+import { ageOn, DIET_DEFAULTS, LIFESTYLE, nutritionTargets, weighIns, type Lifestyle, type NutritionProfile, type Sex } from '@/domain/nutrition';
+import { fromUnits, toUnits } from '@/domain/profile';
 import { apex, useApex } from '@/services/useApex';
 import { goBack } from '@/ui/nav';
-import { ApexCard, Button, Chip, Divider, IconButton, Segmented, Stepper, Txt } from '@/ui/primitives';
-import { WeightStepper } from '@/ui/units';
+import { ApexCard, Button, Chip, Divider, IconButton, NumberField, Segmented, Stepper, Txt } from '@/ui/primitives';
+import { useUnits } from '@/ui/units';
 import { C, F, GUTTER, S } from '@/ui/theme';
 
 type Own = { kcal: number; protein: number; fat: number };
 
 /**
  * Nutrition setup and profile: what the targets are calculated from, the calculation itself, and
- * the athlete's own targets if they prefer them. Starts from what the athlete told APEX.
+ * the athlete's own targets if they prefer them. Starts from what APEX already knows (profile, body
+ * log); a measurement it doesn't know stays blank for the athlete to enter — never assumed.
  */
 export default function NutritionProfileScreen() {
   const { data } = useApex();
   const insets = useSafeAreaInsets();
   const today = apex.today();
   const p = data.nutrition.profile;
+  const u = useUnits();
   const latest = weighIns(data).at(-1)?.kg;
 
-  const [age, setAge] = useState(ageOn(p, today) ?? STARTING_PROFILE.age);
+  const [age, setAge] = useState(ageOn(p, today));
   const [sex, setSex] = useState<Sex | 'unset'>(p.sex ?? 'unset');
-  const [height, setHeight] = useState(data.profile.heightCm ?? STARTING_PROFILE.heightCm);
-  const [weight, setWeight] = useState(latest ?? STARTING_PROFILE.weightKg);
-  const [weighed, setWeighed] = useState(latest === undefined); // a new weigh-in only if there is none or it was changed
-  const [target, setTarget] = useState(data.profile.targetBodyweightKg ?? STARTING_PROFILE.targetKg);
-  const [lifestyle, setLifestyle] = useState<Lifestyle>(p.lifestyle ?? STARTING_PROFILE.lifestyle);
-  const [budget, setBudget] = useState<'budget' | 'moderate'>(p.budget ?? STARTING_PROFILE.budget);
+  const [height, setHeight] = useState(data.profile.heightCm);
+  const [weight, setWeight] = useState(latest);
+  const [weighed, setWeighed] = useState(false); // a new weigh-in only when one is entered here
+  const [target, setTarget] = useState(data.profile.targetBodyweightKg);
+  const [lifestyle, setLifestyle] = useState<Lifestyle>(p.lifestyle ?? DIET_DEFAULTS.lifestyle);
+  const [budget, setBudget] = useState<'budget' | 'moderate'>(p.budget ?? DIET_DEFAULTS.budget);
   const [own, setOwn] = useState<Own | null>(p.override?.kcal ? { kcal: p.override.kcal, protein: p.override.protein ?? 0, fat: p.override.fat ?? 0 } : null);
 
   const draft: NutritionProfile = {
-    ...p, age, ageAsOf: today, sex: sex === 'unset' ? undefined : sex, lifestyle, budget, diet: 'non-vegetarian', avoid: p.avoid ?? [...STARTING_PROFILE.avoid],
+    ...p, age, ageAsOf: today, sex: sex === 'unset' ? undefined : sex, lifestyle, budget, diet: 'non-vegetarian', avoid: p.avoid ?? [...DIET_DEFAULTS.avoid],
     override: own ? { kcal: own.kcal, ...(own.protein && { protein: own.protein }), ...(own.fat && { fat: own.fat }) } : undefined,
   };
   // the calculation as it will be once saved (and without the athlete's own values)
   const targetsWith = (profile: NutritionProfile) => {
     const r = nutritionTargets({
       ...data, profile: { ...data.profile, heightCm: height }, nutrition: { ...data.nutrition, profile },
-      bodyMetrics: weighed ? [...data.bodyMetrics.filter((m) => !(m.kind === 'bodyweight' && m.date === today)), { id: 'draft', date: today, kind: 'bodyweight', value: weight }] : data.bodyMetrics,
+      bodyMetrics: weighed && weight !== undefined ? [...data.bodyMetrics.filter((m) => !(m.kind === 'bodyweight' && m.date === today)), { id: 'draft', date: today, kind: 'bodyweight', value: weight }] : data.bodyMetrics,
     }, today);
     return r.ok ? r.targets : undefined;
   };
@@ -71,18 +74,16 @@ export default function NutritionProfileScreen() {
         <Txt v="bodySm" style={{ marginTop: 4 }}>Goal: gain weight gradually and build muscle while keeping your basketball sharp. Stays on this device.</Txt>
 
         <Txt v="overline" style={styles.section}>About you</Txt>
-        <View style={styles.pair}>
-          <Stepper label="Age" value={age} step={1} min={13} max={90} integer onChange={setAge} />
-          <Stepper label="Height" unit="cm" value={height} step={1} min={120} max={230} integer onChange={setHeight} />
-        </View>
+        <NumberField label="Age" unit="yrs" value={age} min={13} max={90} onSave={(v) => setAge(v === undefined ? undefined : Math.round(v))} />
+        <NumberField label="Height" unit="cm" value={height} min={120} max={230} onSave={(v) => setHeight(v === undefined ? undefined : Math.round(v))} />
+        <NumberField label="Weight now" unit={u} value={weight === undefined ? undefined : toUnits(weight, u)} min={30} max={u === 'lb' ? 550 : 250}
+          onSave={(v) => { setWeight(v === undefined ? latest : fromUnits(v, u)); setWeighed(v !== undefined); }} />
+        {!weighed && latest !== undefined && <Txt v="bodySm">From your body log. Enter a new weight to log today’s weigh-in.</Txt>}
+        <NumberField label="Target weight" unit={u} value={target === undefined ? undefined : toUnits(target, u)} min={35} max={u === 'lb' ? 440 : 200}
+          onSave={(v) => setTarget(v === undefined ? undefined : fromUnits(v, u))} />
         <Txt v="overline" style={styles.field}>Sex · only for the resting-energy equation</Txt>
         <Segmented label="Sex" options={['male', 'female', 'unset'] as const} value={sex} onChange={setSex} format={(v) => (v === 'unset' ? 'NOT SET' : v.toUpperCase())} height={44} />
         {sex === 'unset' && <Txt v="bodySm" style={{ marginTop: 6 }}>Not set: APEX uses the middle of the two equations and labels the target as an estimate.</Txt>}
-        <View style={[styles.pair, styles.field]}>
-          <WeightStepper label="Weight now" value={weight} incrementKg={0.1} max={250} onChange={(kg) => { setWeight(kg); setWeighed(true); }} />
-          <WeightStepper label="Target" value={target} incrementKg={0.5} max={200} onChange={setTarget} />
-        </View>
-        {!weighed && latest !== undefined && <Txt v="bodySm" style={{ marginTop: 6 }}>From your body log. Change it to log today’s weigh-in.</Txt>}
 
         <Txt v="overline" style={styles.field}>Daily life outside training</Txt>
         <Segmented label="Daily life" options={['low', 'moderate', 'high'] as const} value={lifestyle} onChange={setLifestyle} format={(v) => LIFESTYLE[v].label.toUpperCase()} height={44} />

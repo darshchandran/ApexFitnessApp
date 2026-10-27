@@ -200,13 +200,13 @@ describe('over HTTP: propose → confirm → execute → store → retrieve', ()
 describe('nutrition over HTTP', () => {
   it('answers from the athlete’s own logged food — each athlete sees only their own; chat logs nothing', async () => {
     const mine = await device();
-    mine.saveNutrition({ profile: { age: 20, ageAsOf: TODAY }, heightCm: 178, targetKg: 75, weightKg: 68 });
+    mine.saveNutrition({ profile: { age: 24, ageAsOf: TODAY }, heightCm: 183, targetKg: 79, weightKg: 72 });
     mine.logFood({ date: TODAY, meal: 'breakfast', foodId: 'egg', qty: 3 });
     const theirs = await device();
     const before = snapshot(mine);
     const a = await chat(apex.url, mine, 'How much protein have I had today?', 'athlete_n1', 'conv-n1');
     expect(a.status).toBe(200);
-    expect(a.json).toMatchObject({ tools_used: ['get_nutrition_day'], action_required: false, message: 'Logged so far: 18.9 g of your 120 g protein (estimates).' });
+    expect(a.json).toMatchObject({ tools_used: ['get_nutrition_day'], action_required: false, message: 'Logged so far: 18.9 g of your 130 g protein (estimates).' });
     const b = await chat(apex.url, theirs, 'How much protein have I had today?', 'athlete_n2', 'conv-n2');
     expect(b.json.message).toBe('Set up Nutrition first.');
     expect(snapshot(mine)).toEqual(before); // asking changes nothing

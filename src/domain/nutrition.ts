@@ -66,14 +66,8 @@ export const LIFESTYLE: Record<Lifestyle, { factor: number; label: string; sub: 
   high: { factor: 1.55, label: 'On my feet', sub: 'Active job or lots of walking' },
 };
 
-/**
- * What the athlete told APEX when Nutrition started (2026-10-23) — setup's starting values, each
- * editable. Sex wasn't given, so targets stay a labelled estimate until it is.
- */
-export const STARTING_PROFILE = {
-  age: 20, ageAsOf: '2026-10-23', heightCm: 178, weightKg: 68, targetKg: 75,
-  diet: 'non-vegetarian', avoid: ['beef'], budget: 'moderate', lifestyle: 'moderate',
-} as const;
+/** Diet rules APEX applies until the athlete changes them. Body measurements have no defaults: the athlete enters them. */
+export const DIET_DEFAULTS = { diet: 'non-vegetarian', avoid: ['beef'], budget: 'moderate', lifestyle: 'moderate' } as const;
 
 export const emptyNutrition = (): NutritionData => ({ profile: {}, days: {} });
 
@@ -257,6 +251,20 @@ export function nutritionTargets(d: ApexData, date: ISODate): TargetsResult {
       trainingPerDay: training.perDay, trainingSessions: training.sessions, maintenance, surplus, adjustment, weightKg: +kg.toFixed(1), overridden, notes,
     },
   };
+}
+
+/** Why a day has no targets — so the screen can say so while still showing what was eaten. */
+export type TargetsGap =
+  | { kind: 'setup' }
+  /** Targets use the latest weigh-in on or before the day; `first` = the first weigh-in after it, if any. */
+  | { kind: 'no-weigh-in'; first?: ISODate }
+  | { kind: 'missing'; missing: Missing[] };
+
+export function targetsGap(d: ApexData, t: TargetsResult, date: ISODate): TargetsGap | undefined {
+  if (t.ok) return undefined;
+  if (!d.nutrition.profile.setupAt) return { kind: 'setup' };
+  if (t.missing.length === 1 && t.missing[0] === 'weight') return { kind: 'no-weigh-in', first: weighIns(d).find((w) => w.date > date)?.date };
+  return { kind: 'missing', missing: t.missing };
 }
 
 // ---------- the day: training type ----------

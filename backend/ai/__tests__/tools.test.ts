@@ -210,7 +210,7 @@ describe('nutrition tools', () => {
   const fed = async (edit?: (app: Awaited<ReturnType<typeof device>>) => void, food = true) => {
     const app = await device();
     app.updateProfile({ gymTime: 'evening' });
-    app.saveNutrition({ profile: { age: 20, ageAsOf: TODAY, lifestyle: 'moderate', avoid: ['beef'], budget: 'moderate' }, heightCm: 178, targetKg: 75, weightKg: 68 });
+    app.saveNutrition({ profile: { age: 24, ageAsOf: TODAY, lifestyle: 'moderate', avoid: ['beef'], budget: 'moderate' }, heightCm: 183, targetKg: 79, weightKg: 72 });
     if (food) {
       app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'egg', qty: 3 });
       app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'roti', qty: 2 });
@@ -309,7 +309,7 @@ describe('nutrition tools', () => {
     expect(await run('get_nutrition_day', { date: '2026-10-06' }, set)).toMatchObject({
       set_up: true, targets: null, unavailable: ["targets, remaining and suggestions: missing a weigh-in on or before 2026-10-06 — add it in the app's Nutrition tab"],
     });
-    const weighed = { ...set, bodyMetrics: [...set.bodyMetrics, { id: 'bw0', date: '2026-10-01', kind: 'bodyweight' as const, value: 68 }] };
+    const weighed = { ...set, bodyMetrics: [...set.bodyMetrics, { id: 'bw0', date: '2026-10-01', kind: 'bodyweight' as const, value: 72 }] };
     const past = await run('get_nutrition_day', { date: '2026-10-06' }, weighed);
     expect(past).toMatchObject({ targets: { kcal: expect.any(Number) }, suggested: [], pre_gym: null, unavailable: ['suggested meals: APEX suggests meals for today only'], logged: [] });
     // basketball still planned, the gym session made a recovery day: no pre-gym meal, and it says why
