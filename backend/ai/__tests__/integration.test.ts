@@ -206,7 +206,7 @@ describe('nutrition over HTTP', () => {
     const before = snapshot(mine);
     const a = await chat(apex.url, mine, 'How much protein have I had today?', 'athlete_n1', 'conv-n1');
     expect(a.status).toBe(200);
-    expect(a.json).toMatchObject({ tools_used: ['get_nutrition_day'], action_required: false, message: 'Logged so far: 19 g of your 120 g protein (estimates).' });
+    expect(a.json).toMatchObject({ tools_used: ['get_nutrition_day'], action_required: false, message: 'Logged so far: 18.9 g of your 120 g protein (estimates).' });
     const b = await chat(apex.url, theirs, 'How much protein have I had today?', 'athlete_n2', 'conv-n2');
     expect(b.json.message).toBe('Set up Nutrition first.');
     expect(snapshot(mine)).toEqual(before); // asking changes nothing

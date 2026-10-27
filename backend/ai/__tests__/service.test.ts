@@ -29,6 +29,10 @@ describe('the Chat Completions tool loop', () => {
     expect(INSTRUCTIONS).toMatch(/quote engine_recommendation[\s\S]*never change, soften or contradict it/);
     expect(INSTRUCTIONS).toMatch(/"no_history"[\s\S]*never present catalogue exercises/);
     expect(INSTRUCTIONS).toMatch(/PRs, measurements and profile changes are entered by the athlete in the app — never offer to log them yourself/); // seen live: "I can log it"
+    // nutrition (seen live: invented per-item kcal and the wrong pre-gym timing): tool numbers only, gaps said
+    expect(INSTRUCTIONS).toMatch(/Every calorie, macro, amount and pre-gym timing you give must be one a tool returned/);
+    expect(INSTRUCTIONS).toMatch(/say it isn't available in APEX — never fill the gap from general knowledge/);
+    expect(INSTRUCTIONS).toMatch(/pre_gym option whose timing matches the time the athlete says they have/);
     expect(b.tools).toHaveLength(16);
     expect(b.messages.slice(1)).toEqual([{ role: 'user', content: 'hello' }]);
     // the test config is OpenAI: nothing stored there, an opaque per-athlete id (Groq takes neither — see below)

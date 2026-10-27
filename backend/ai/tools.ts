@@ -9,7 +9,7 @@
 // there is no execute tool: execution happens only at POST /ai/actions/:id/confirm.
 import { GYM_EXERCISES, gymExercise, hasGymExercise } from '../../src/domain/catalog';
 import { APEX_CONFIG } from '../../src/domain/config';
-import { amountText, FOOD_DATA_NOTE, gramsOf, macrosOf, searchFoods, ZERO, addMacros, type Macros } from '../../src/domain/foods';
+import { addMacros, amountText, FOOD_DATA_NOTE, gramsOf, macrosOf, searchFoods, ZERO, type Food, type Macros, type MealSlot, type PreGymWindow } from '../../src/domain/foods';
 import { completed } from '../../src/domain/history';
 import { dayLoads, plyoSetsDone } from '../../src/domain/load';
 import { adaptationStatus, exerciseBests, exerciseHistory, liveExercise, nextProgression, workoutSummary } from '../../src/domain/logbook';
@@ -20,7 +20,7 @@ import { buildContext } from '../../src/domain/strain';
 import type { ApexData, ISODate, SessionInstance, SetLog } from '../../src/domain/types';
 import { addDays, weekdayIndex } from '../../src/domain/util';
 import { muscleVolume } from '../../src/domain/volume';
-import { DAY_LABEL, dayLog, dayPlan, dayType, MEAL_LABEL, nutritionTargets, remaining, weightTrend } from '../../src/domain/nutrition';
+import { DAY_LABEL, dayLog, dayPlan, dayType, MAIN_MEALS, MEAL_LABEL, nutritionTargets, remaining, totalsOf, weightTrend, WINDOW_LABEL, type PlannedMeal } from '../../src/domain/nutrition';
 import { progressOverview, todayOverview } from '../../src/services/apex';
 import { ACTIONS, ActionRejected, simulate, type ActionDraft, type ActionType } from './actions';
 import { check, S, type Schema } from './schemas';
@@ -201,7 +201,24 @@ function programName(d: ApexData, e: DayEntry) {
 
 const NONE = S.obj({});
 const MACROS = S.obj({ kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num() });
-const macros = (m: Macros) => ({ kcal: round(m.kcal), protein_g: round(m.protein), carbs_g: round(m.carbs), fat_g: round(m.fat) });
+const g1 = (n: number) => Math.round(n * 10) / 10;
+/** kcal whole, grams to 0.1 g — the precision APEX stores — so items, meals and the day add up exactly. */
+const macros = (m: Macros) => ({ kcal: round(m.kcal), protein_g: g1(m.protein), carbs_g: g1(m.carbs), fat_g: g1(m.fat) });
+const FOOD_ITEM = S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() });
+const SUGGESTION = { name: S.str(), items: S.list(FOOD_ITEM), kcal: S.num(), protein_g: S.num(), logged: S.bool() };
+const item = (x: { name: string; qty: number; unit: string; kcal: number; protein: number }) => ({ food: x.name, amount: amountText(x.qty, x.unit), kcal: x.kcal, protein_g: g1(x.protein) });
+const suggestion = (m: PlannedMeal) => ({ name: m.name, items: m.items.map(item), kcal: m.kcal, protein_g: g1(m.protein), logged: m.eaten });
+const timing = (w: PreGymWindow) => `${WINDOW_LABEL[w]} before training`;
+const SLOTS: MealSlot[] = [...MAIN_MEALS, 'preGym'];
+const LOGGED_ITEMS = 40; // listed per day (token budget); meal and day totals always cover every item
+
+/** The athlete's unit → one of the food's own ("rotis" → roti, "grams" → g); null = its usual unit; undefined = none like it. */
+function unitOf(f: Food, asked: string | null) {
+  if (asked === null) return f.units[0].unit;
+  const w = asked.trim().toLowerCase().replace(/^(grams?|gms?)$/, 'g').replace(/^millilit(?:er|re)s?$/, 'ml');
+  if (w === f.base) return f.base;
+  return f.units.find((v) => w === v.unit || w === `${v.unit}s` || w === `${v.unit}es`)?.unit;
+}
 const NUTRITION_NOTE = `Estimates, not prescriptions or medical advice. ${FOOD_DATA_NOTE}`;
 const LOAD_NOTE = 'Training load is APEX’s internal programming number (arbitrary units), not a medical measure. Only logged sessions count.';
 
@@ -525,13 +542,14 @@ const READ_TOOLS: ApexTool[] = [
   {
     name: 'get_nutrition_day',
     access: 'read',
-    description: 'Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food the athlete logged and what is left, the day type, today’s suggested meals (not eaten until logged), weight trend and diet preferences.',
+    description: 'Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food logged per meal with item and meal totals, what is left, today’s suggested meals and pre-gym options for each time before training (not eaten until logged), the day type, weight trend and diet. "unavailable" says what is missing and why.',
     input: S.obj({ date: S.orNull(S.text('^\\d{4}-\\d{2}-\\d{2}$', 'YYYY-MM-DD; null = today')) }),
     output: S.obj({
-      date: S.str(), set_up: S.bool(), missing: S.list(S.str()), targets: S.orNull(MACROS), basis: S.list(S.str()),
-      day_type: S.str(), logged: S.list(S.obj({ meal: S.str(), food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() })),
+      date: S.str(), set_up: S.bool(), targets: S.orNull(MACROS), basis: S.list(S.str()), unavailable: S.list(S.str()), day_type: S.str(),
+      logged: S.list(S.obj({ meal: S.str(), kcal: S.num(), protein_g: S.num(), items: S.list(FOOD_ITEM) })), items_not_listed: S.num(),
       eaten: MACROS, remaining: S.orNull(MACROS),
-      suggested: S.list(S.obj({ meal: S.str(), name: S.str(), items: S.str(), kcal: S.num(), protein_g: S.num(), logged: S.bool() })),
+      suggested: S.list(S.obj({ meal: S.str(), ...SUGGESTION })),
+      pre_gym: S.orNull(S.obj({ gym_time: S.orNull(S.str()), shown_in_app: S.str(), options: S.list(S.obj({ timing: S.str(), ...SUGGESTION })) })),
       weight: S.obj({ latest: S.orNull(S.str()), week_median: S.orNull(S.str()), target: S.orNull(S.str()), trend: S.str(), per_week: S.orNull(S.str()), suggestion_kcal: S.num(), note: S.str() }),
       diet: S.str(), note: S.str(),
     }),
@@ -543,17 +561,39 @@ const READ_TOOLS: ApexTool[] = [
       const log = dayLog(d, date);
       const day = dayType(d, date, ctx.today);
       const plan = t.ok && date === ctx.today ? dayPlan(d, date, ctx.today, t.targets) : undefined;
+      // the pre-gym suggestion for every time-before-training, so an answer can match the athlete's timing
+      const atWindow = (preGym: PreGymWindow) => ({ ...d, nutrition: { ...d.nutrition, days: { ...d.nutrition.days, [date]: { ...d.nutrition.days[date], preGym } } } });
+      const preGym = plan?.preGym && t.ok ? {
+        gym_time: day.gym.time ?? null,
+        shown_in_app: timing(plan.preGym.window),
+        options: (Object.keys(WINDOW_LABEL) as PreGymWindow[]).flatMap((x) => {
+          const m = dayPlan(atWindow(x), date, ctx.today, t.targets).preGym;
+          return m ? [{ timing: timing(x), ...suggestion(m) }] : [];
+        }),
+      } : null;
+      const unavailable = [
+        ...(t.ok ? [] : [`targets, remaining and suggestions: missing ${t.missing.map((x) => (x === 'weight' ? `a weigh-in on or before ${date}` : x)).join(', ')} — add ${t.missing.length > 1 ? 'them' : 'it'} in the app's Nutrition tab`]),
+        ...(t.ok && date !== ctx.today ? ['suggested meals: APEX suggests meals for today only'] : []),
+        ...(plan && !preGym ? ['pre-gym meal: no gym session today'] : []),
+      ];
+      // every meal's totals cover all its food; items are listed up to a cap, and the rest are counted
+      let listed = 0;
+      const logged = SLOTS.flatMap((slot) => {
+        const all = log.byMeal[slot];
+        const items = all.slice(0, Math.max(0, LOGGED_ITEMS - listed));
+        listed += items.length;
+        const sum = macros(totalsOf(all));
+        return all.length ? [{ meal: MEAL_LABEL[slot], kcal: sum.kcal, protein_g: sum.protein_g, items: items.map(item) }] : [];
+      });
       const w = weightTrend(d, ctx.today);
       const p = d.nutrition.profile;
       return {
-        date, set_up: !!p.setupAt, missing: t.ok ? [] : t.missing, targets: t.ok ? macros(t.targets) : null, basis: t.ok ? t.targets.notes.slice(1) : [],
+        date, set_up: !!p.setupAt, targets: t.ok ? macros(t.targets) : null, basis: t.ok ? t.targets.notes.slice(1) : [], unavailable,
         day_type: `${DAY_LABEL[day.kind]}${day.gym.done || day.basketball.done ? ' (logged)' : day.kind === 'rest' ? '' : ' (planned)'}`,
-        logged: log.entries.slice(0, 40).map((e) => ({ meal: MEAL_LABEL[e.meal], food: e.name, amount: amountText(e.qty, e.unit), kcal: e.kcal, protein_g: round(e.protein) })),
+        logged, items_not_listed: log.entries.length - listed,
         eaten: macros(log.totals), remaining: t.ok ? macros(remaining(t.targets, log.totals)) : null,
-        suggested: plan ? [...plan.meals, ...(plan.preGym ? [plan.preGym] : [])].map((m) => ({
-          meal: m.slot === 'preGym' && plan.preGym ? `Pre-gym (${plan.preGym.window})` : MEAL_LABEL[m.slot], name: m.name,
-          items: m.items.map((i) => `${i.name}: ${amountText(i.qty, i.unit)}`).join('; '), kcal: m.kcal, protein_g: round(m.protein), logged: m.eaten,
-        })) : [],
+        suggested: plan ? plan.meals.map((m) => ({ meal: MEAL_LABEL[m.slot], ...suggestion(m) })) : [],
+        pre_gym: preGym,
         weight: {
           latest: w.latest ? `${wtu(w.latest.kg, u)} on ${w.latest.date}` : null, week_median: w.weekKg === undefined ? null : wtu(w.weekKg, u),
           target: d.profile.targetBodyweightKg === undefined ? null : wtu(d.profile.targetBodyweightKg, u), trend: w.status,
@@ -567,7 +607,7 @@ const READ_TOOLS: ApexTool[] = [
   {
     name: 'get_meal_estimate',
     access: 'read',
-    description: 'Calories and macros for foods from APEX’s food table (Indian staples). Use it for every number in a meal or food you suggest. Unknown foods come back with close matches.',
+    description: 'Calories and macros for foods from APEX’s food table (Indian staples), item by item with a total. Use it for every number in a food or meal you suggest. Unknown foods, units or amounts come back in not_found — never estimate those yourself.',
     input: S.obj({
       items: S.list(S.obj({
         food: S.text('^[^\\n]{1,60}$', 'As the athlete would say it, e.g. "dal", "anda", "chicken curry"'),
@@ -575,26 +615,36 @@ const READ_TOOLS: ApexTool[] = [
       }), 12),
     }),
     output: S.obj({
-      items: S.list(S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
-      not_found: S.list(S.obj({ asked: S.str(), closest: S.list(S.str()) })),
+      items: S.list(S.obj({ food: S.str(), amount: S.str(), amount_from: S.oneOf(['asked', 'usual serving']), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
+      not_found: S.list(S.obj({ asked: S.str(), reason: S.oneOf(['unknown food', 'unknown unit', 'amount out of range']), options: S.list(S.str()) })),
       total: MACROS, note: S.str(),
     }),
     run(_d, a) {
-      const items: { food: string; amount: string; kcal: number; protein_g: number; carbs_g: number; fat_g: number; cost: string }[] = [];
-      const missing: { asked: string; closest: string[] }[] = [];
+      const items: Record<string, unknown>[] = [];
+      const missing: { asked: string; reason: string; options: string[] }[] = [];
       let total = ZERO;
       for (const x of a.items as { food: string; quantity: number | null; unit: string | null }[]) {
         const f = searchFoods(x.food, 1)[0];
-        const unit = x.unit === 'g' || x.unit === 'ml' ? f?.base : x.unit && f?.units.some((v) => v.unit === x.unit) ? x.unit : f?.units[0].unit;
-        const qty = x.quantity !== null && x.quantity > 0 && x.quantity <= 5000 ? x.quantity : f?.serve;
-        const grams = f && unit && qty ? gramsOf(f, qty, unit) : undefined;
-        if (!f || !grams || grams > 3000) {
-          missing.push({ asked: x.food, closest: searchFoods(x.food.split(' ')[0], 3).map((c) => c.name) });
+        if (!f) {
+          missing.push({ asked: x.food, reason: 'unknown food', options: searchFoods(x.food.split(' ')[0], 3).map((c) => c.name) });
+          continue;
+        }
+        // no quantity → APEX's usual serving, said so; a unit APEX doesn't know is never swapped for another
+        const usual = x.quantity === null;
+        const unit = usual ? f.units[0].unit : unitOf(f, x.unit);
+        if (!unit) {
+          missing.push({ asked: `${x.food} (${x.unit})`, reason: 'unknown unit', options: [...new Set([...f.units.map((v) => v.unit), f.base])] });
+          continue;
+        }
+        const qty = usual ? f.serve : x.quantity!;
+        const grams = qty > 0 ? gramsOf(f, qty, unit) : undefined;
+        if (!grams || grams > 3000) {
+          missing.push({ asked: `${x.food} (${x.quantity} ${unit})`, reason: 'amount out of range', options: [] });
           continue;
         }
         const m = macrosOf(f, grams);
         total = addMacros(total, m);
-        items.push({ food: f.name, amount: amountText(qty!, unit!), ...macros(m), cost: f.cost === 1 ? 'budget' : 'moderate' });
+        items.push({ food: f.name, amount: amountText(qty, unit), amount_from: usual ? 'usual serving' : 'asked', ...macros(m), cost: f.cost === 1 ? 'budget' : 'moderate' });
       }
       return { items, not_found: missing, total: macros(total), note: NUTRITION_NOTE };
     },

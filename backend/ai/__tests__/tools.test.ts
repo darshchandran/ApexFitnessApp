@@ -8,7 +8,8 @@ import { ACTIONS } from '../actions';
 import { check, type Schema } from '../schemas';
 import { runTool, toolDefinitions, TOOLS, type ToolContext } from '../tools';
 import { athleteData, device, NOW, snapshot, TODAY, trainedAthlete } from '../test-utils';
-import { dayLog, nutritionTargets } from '../../../src/domain/nutrition';
+import { dayLog, dayPlan, MEAL_LABEL, nutritionTargets, WINDOW_LABEL, type PlannedMeal } from '../../../src/domain/nutrition';
+import { amountText, foodById, gramsOf, macrosOf, MEALS, type PreGymWindow } from '../../../src/domain/foods';
 import { completedGym } from '../../../src/test-utils';
 
 const ctxFor = (data: ApexData | null): ToolContext => ({ data: data && deepFreeze(structuredClone(data)), today: TODAY, proposals: [] });
@@ -200,59 +201,160 @@ describe('tools use the existing APEX engine', () => {
 });
 
 describe('nutrition tools', () => {
-  /** Set up, with breakfast logged from food the athlete entered. */
-  const fed = async () => {
+  type Item = { food: string; amount: string; kcal: number; protein_g: number };
+  type Meal = { meal?: string; timing?: string; name: string; items: Item[]; kcal: number; protein_g: number; logged: boolean };
+  const g1 = (n: number) => Math.round(n * 10) / 10;
+  const sum = (xs: number[]) => xs.reduce((s, x) => s + x, 0);
+
+  /** Set up (evening gym), then `edit`; by default breakfast is logged from food the athlete entered. */
+  const fed = async (edit?: (app: Awaited<ReturnType<typeof device>>) => void, food = true) => {
     const app = await device();
+    app.updateProfile({ gymTime: 'evening' });
     app.saveNutrition({ profile: { age: 20, ageAsOf: TODAY, lifestyle: 'moderate', avoid: ['beef'], budget: 'moderate' }, heightCm: 178, targetKg: 75, weightKg: 68 });
-    app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'egg', qty: 3 });
-    app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'roti', qty: 2 });
+    if (food) {
+      app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'egg', qty: 3 });
+      app.logFood({ date: TODAY, meal: 'breakfast', foodId: 'roti', qty: 2 });
+    }
+    edit?.(app);
     return snapshot(app);
   };
-
-  it('targets, logged food and what is left come from APEX’s own nutrition code; suggestions are not eaten', async () => {
-    const d = await fed();
+  const targetsOf = (d: ApexData) => {
     const t = nutritionTargets(d, TODAY);
     if (!t.ok) throw new Error('no targets');
+    return t.targets;
+  };
+  /** What the tool must say for a planned meal: each item recomputed from the food table, not taken from the tool. */
+  const fromTable = (m: PlannedMeal) => ({
+    name: m.name, kcal: m.kcal, protein_g: m.protein, logged: m.eaten,
+    items: m.items.map((i) => {
+      const f = foodById(i.foodId)!;
+      const x = macrosOf(f, gramsOf(f, i.qty, i.unit)!);
+      return { food: f.name, amount: amountText(i.qty, i.unit), kcal: x.kcal, protein_g: x.protein };
+    }),
+  });
+  /** Items add up to the meal; the meal is what the tool says. */
+  const addsUp = (m: Meal) => {
+    expect([m.name, sum(m.items.map((i) => i.kcal)), g1(sum(m.items.map((i) => i.protein_g)))]).toEqual([m.name, m.kcal, m.protein_g]);
+  };
+
+  it('suggested meals and every pre-gym timing carry APEX’s own per-item numbers (seen live: invented per-item kcal, the wrong timing)', async () => {
+    const d = await fed((app) => app.setPreGymWindow(TODAY, 'under45'));
+    const t = targetsOf(d);
     const n = await run('get_nutrition_day', { date: null }, d);
-    const eaten = dayLog(d, TODAY).totals;
-    expect(n).toMatchObject({
-      date: TODAY, set_up: true, missing: [], targets: { kcal: t.targets.kcal, protein_g: t.targets.protein },
-      logged: [{ meal: 'Breakfast', food: 'Egg (whole)', amount: '3 eggs', kcal: 215, protein_g: 19 }, { meal: 'Breakfast', food: 'Roti / chapati', amount: '2 rotis', kcal: 220, protein_g: 7 }],
-      eaten: { kcal: eaten.kcal }, remaining: { kcal: t.targets.kcal - eaten.kcal },
-      diet: expect.stringMatching(/non-vegetarian; never: beef; .*no supplements/),
+    const plan = dayPlan(d, TODAY, TODAY, t);
+    expect(n.suggested).toEqual(plan.meals.map((m) => ({ meal: MEAL_LABEL[m.slot], ...fromTable(m) })));
+    // one option per time before training, each the meal APEX picks for that timing; the app's choice is named
+    const at = (w: PreGymWindow) => dayPlan({ ...d, nutrition: { ...d.nutrition, days: { [TODAY]: { preGym: w } } } }, TODAY, TODAY, t).preGym!;
+    const windows: PreGymWindow[] = ['under45', '1to2h', '2to3h'];
+    expect(n.pre_gym).toEqual({
+      gym_time: 'evening', shown_in_app: 'Under 45 min before training',
+      options: windows.map((w) => ({ timing: `${WINDOW_LABEL[w]} before training`, ...fromTable(at(w)) })),
     });
-    expect(n.basis.join(' ')).toMatch(/Mifflin–St Jeor/);
-    expect(n.suggested.length).toBeGreaterThanOrEqual(4);
-    expect(n.suggested.every((m: { logged: boolean }) => !m.logged)).toBe(true); // shown, not eaten
-    expect(n.eaten.kcal).toBe(435);
+    expect(n.pre_gym.options.map((o: Meal) => MEALS.find((x) => x.name === o.name)?.window)).toEqual(windows);
+    for (const m of [...n.suggested, ...n.pre_gym.options] as Meal[]) {
+      expect(m.items.length).toBeGreaterThan(0);
+      for (const i of m.items) expect([i.kcal, i.protein_g].every((v) => Number.isFinite(v) && v >= 0)).toBe(true);
+      addsUp(m);
+    }
+    expect(n.suggested.every((m: Meal) => !m.logged)).toBe(true); // shown, not eaten
     expect(JSON.stringify(n).toLowerCase()).not.toMatch(/beef curry|beef,|whey|protein powder/);
   });
 
-  it('a fresh install says what is missing instead of inventing targets', async () => {
-    const n = await run('get_nutrition_day', { date: null }, await athleteData());
-    expect(n).toMatchObject({ set_up: false, targets: null, remaining: null, missing: ['age', 'height', 'weight'], logged: [], suggested: [] });
+  it('logged food: items, meal totals and the day total agree, to the food table', async () => {
+    const d = await fed((app) => { app.logFood({ date: TODAY, meal: 'lunch', foodId: 'dal', qty: 1.5 }); });
+    const t = targetsOf(d);
+    const n = await run('get_nutrition_day', { date: null }, d);
+    expect(n.logged).toEqual([
+      { meal: 'Breakfast', kcal: 435, protein_g: 25.9, items: [{ food: 'Egg (whole)', amount: '3 eggs', kcal: 215, protein_g: 18.9 }, { food: 'Roti / chapati', amount: '2 rotis', kcal: 220, protein_g: 7 }] },
+      { meal: 'Lunch', kcal: 248, protein_g: 14.6, items: [{ food: 'Dal (cooked, home-style)', amount: '1.5 katoris', kcal: 248, protein_g: 14.6 }] },
+    ]);
+    for (const m of n.logged) addsUp({ ...m, name: m.meal, logged: true });
+    expect(n.items_not_listed).toBe(0);
+    expect(n.eaten).toEqual({ kcal: 683, protein_g: 40.5, carbs_g: dayLog(d, TODAY).totals.carbs, fat_g: dayLog(d, TODAY).totals.fat });
+    expect(n.eaten.kcal).toBe(sum(n.logged.map((m: { kcal: number }) => m.kcal)));
+    expect(n.remaining).toEqual({ kcal: t.kcal - 683, protein_g: g1(t.protein - 40.5), carbs_g: g1(t.carbs - n.eaten.carbs_g), fat_g: g1(t.fat - n.eaten.fat_g) });
+    expect(n.basis.join(' ')).toMatch(/Mifflin–St Jeor/);
+    expect(n.diet).toMatch(/non-vegetarian; never: beef; .*no supplements/);
+  });
+
+  it('an empty log is zero eaten and the whole target left — not missing data', async () => {
+    const d = await fed(undefined, false);
+    const t = targetsOf(d);
+    const n = await run('get_nutrition_day', { date: null }, d);
+    expect(n).toMatchObject({ set_up: true, unavailable: [], logged: [], items_not_listed: 0, eaten: { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0 } });
+    expect(n.remaining).toEqual({ kcal: t.kcal, protein_g: t.protein, carbs_g: t.carbs, fat_g: t.fat });
+    expect(n.suggested).toHaveLength(4);
+  });
+
+  it('with more items than it lists, meal and day totals still cover every item — and say how many are not listed', async () => {
+    const d = await fed((app) => { for (let i = 0; i < 45; i++) app.logFood({ date: TODAY, meal: 'snacks', foodId: 'egg', qty: 1 }); });
+    const n = await run('get_nutrition_day', { date: null }, d);
+    const all = dayLog(d, TODAY);
+    expect(sum(n.logged.map((m: { items: Item[] }) => m.items.length))).toBe(40);
+    expect(n.items_not_listed).toBe(all.entries.length - 40);
+    expect(n.logged.find((m: { meal: string }) => m.meal === 'Snacks')).toMatchObject({ kcal: 45 * 72, protein_g: g1(45 * 6.3) });
+    expect(n.eaten.kcal).toBe(all.totals.kcal);
+    expect(n.eaten.kcal).toBe(sum(n.logged.map((m: { kcal: number }) => m.kcal)));
+    expect(n.eaten.protein_g).toBe(g1(sum(n.logged.map((m: { protein_g: number }) => m.protein_g))));
+  });
+
+  it('missing data is said, never filled in: no profile, a past day, no gym today', async () => {
+    const fresh = await run('get_nutrition_day', { date: null }, await athleteData());
+    expect(fresh).toMatchObject({
+      set_up: false, targets: null, remaining: null, suggested: [], pre_gym: null, logged: [], eaten: { kcal: 0 },
+      unavailable: ["targets, remaining and suggestions: missing age, height, a weigh-in on or before 2026-10-07 — add them in the app's Nutrition tab"],
+    });
+    // a day before the first weigh-in: set up, but no weight for that day — said as such, not as "set up nutrition"
+    const set = await fed();
+    expect(await run('get_nutrition_day', { date: '2026-10-06' }, set)).toMatchObject({
+      set_up: true, targets: null, unavailable: ["targets, remaining and suggestions: missing a weigh-in on or before 2026-10-06 — add it in the app's Nutrition tab"],
+    });
+    const weighed = { ...set, bodyMetrics: [...set.bodyMetrics, { id: 'bw0', date: '2026-10-01', kind: 'bodyweight' as const, value: 68 }] };
+    const past = await run('get_nutrition_day', { date: '2026-10-06' }, weighed);
+    expect(past).toMatchObject({ targets: { kcal: expect.any(Number) }, suggested: [], pre_gym: null, unavailable: ['suggested meals: APEX suggests meals for today only'], logged: [] });
+    // basketball still planned, the gym session made a recovery day: no pre-gym meal, and it says why
+    const noGym = await fed((app) => { for (const i of app.getState().data.instances.filter((x) => x.date === TODAY)) app.takeRecoveryDay(i.id); });
+    const r = await run('get_nutrition_day', { date: null }, noGym);
+    expect(r).toMatchObject({ day_type: 'Basketball day (planned)', pre_gym: null, unavailable: ['pre-gym meal: no gym session today'] });
+    expect(r.suggested).toHaveLength(4);
     expect((await runTool('get_nutrition_day', JSON.stringify({ date: '2026-10-08' }), ctxFor(await fed()))).ok).toBe(false); // no future days
     expect(await runTool('get_nutrition_day', JSON.stringify({ date: 'yesterday' }), ctxFor(await fed()))).toMatchObject({ ok: false, detail: '$.date: wrong format' });
   });
 
-  it('estimates meals from the food table — Hindi names, units, grams; beef is never in it', async () => {
+  it('estimates meals from the food table item by item; unknown foods, units and amounts are refused, never swapped', async () => {
     const m = await run('get_meal_estimate', { items: [
-      { food: 'anda', quantity: 2, unit: null }, { food: 'dal', quantity: 1, unit: 'katori' }, { food: 'rice', quantity: 200, unit: 'g' },
-      { food: 'milk', quantity: 300, unit: 'ml' }, { food: 'beef curry', quantity: 1, unit: null },
+      { food: 'anda', quantity: 2, unit: null }, { food: 'roti', quantity: 3, unit: 'rotis' }, { food: 'rice', quantity: 200, unit: 'grams' },
+      { food: 'milk', quantity: 300, unit: 'ml' }, { food: 'dal', quantity: null, unit: null },
+      { food: 'rice', quantity: 2, unit: 'cup' }, { food: 'rice', quantity: 5000, unit: 'g' }, { food: 'egg', quantity: 0, unit: null }, { food: 'beef curry', quantity: 1, unit: null },
     ] }, await athleteData());
-    expect(m.items.map((i: { food: string; amount: string }) => [i.food, i.amount])).toEqual([
-      ['Egg (whole)', '2 eggs'], ['Dal (cooked, home-style)', '1 katori'], ['Rice, cooked', '200 g'], ['Milk, toned', '300 ml'],
+    const table = (id: string, qty: number, unit?: string) => {
+      const f = foodById(id)!;
+      const x = macrosOf(f, gramsOf(f, qty, unit)!);
+      return { kcal: x.kcal, protein_g: x.protein, carbs_g: x.carbs, fat_g: x.fat };
+    };
+    expect(m.items).toEqual([
+      { food: 'Egg (whole)', amount: '2 eggs', amount_from: 'asked', ...table('egg', 2), cost: 'budget' },
+      { food: 'Roti / chapati', amount: '3 rotis', amount_from: 'asked', ...table('roti', 3), cost: 'budget' },
+      { food: 'Rice, cooked', amount: '200 g', amount_from: 'asked', ...table('rice', 200, 'g'), cost: 'budget' },
+      { food: 'Milk, toned', amount: '300 ml', amount_from: 'asked', ...table('milk-toned', 300, 'ml'), cost: 'budget' },
+      { food: 'Dal (cooked, home-style)', amount: '1 katori', amount_from: 'usual serving', ...table('dal', 1), cost: 'budget' },
     ]);
-    expect(m.items[0]).toMatchObject({ kcal: 143, protein_g: 13, cost: 'budget' });
-    expect(m.not_found).toEqual([{ asked: 'beef curry', closest: [] }]);
-    expect(m.total.kcal).toBe(m.items.reduce((s: number, i: { kcal: number }) => s + i.kcal, 0));
+    expect(m.not_found).toEqual([
+      { asked: 'rice (cup)', reason: 'unknown unit', options: ['bowl', 'g'] }, // not quietly turned into "2 bowls"
+      { asked: 'rice (5000 g)', reason: 'amount out of range', options: [] },
+      { asked: 'egg (0 egg)', reason: 'amount out of range', options: [] },
+      { asked: 'beef curry', reason: 'unknown food', options: [] },
+    ]);
+    const items = m.items as { kcal: number; protein_g: number; carbs_g: number; fat_g: number }[];
+    expect(m.total).toEqual({ kcal: sum(items.map((i) => i.kcal)), protein_g: g1(sum(items.map((i) => i.protein_g))), carbs_g: g1(sum(items.map((i) => i.carbs_g))), fat_g: g1(sum(items.map((i) => i.fat_g))) });
     expect(m.note).toMatch(/Estimates/);
+    expect(await run('get_meal_estimate', { items: [{ food: 'pizza', quantity: 1, unit: null }] }, await athleteData())).toMatchObject({ items: [], total: { kcal: 0, protein_g: 0 } });
   });
 
   it('each request sees only the data it was sent: two athletes, two different days', async () => {
     const mine = await fed();
     const theirs = await athleteData();
-    expect((await run('get_nutrition_day', { date: null }, mine)).logged).toHaveLength(2);
+    expect((await run('get_nutrition_day', { date: null }, mine)).eaten.kcal).toBe(435);
     expect((await run('get_nutrition_day', { date: null }, theirs)).logged).toEqual([]);
   });
 });

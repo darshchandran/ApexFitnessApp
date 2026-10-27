@@ -1107,9 +1107,9 @@ function profileFacts(d) {
   };
 }
 function plannedBasketball(d, date) {
-  const item = itemsOn(d, weekdayIndex(date)).find((i) => i.kind === "basketball");
+  const item2 = itemsOn(d, weekdayIndex(date)).find((i) => i.kind === "basketball");
   const logged = d.basketball.some((b) => b.date === date);
-  return item ? { item, logged } : void 0;
+  return item2 ? { item: item2, logged } : void 0;
 }
 function scheduleNotes(d, date) {
   const bb = plannedBasketball(d, date);
@@ -1876,6 +1876,7 @@ var dayFor = (plan, date) => plan.days[weekdayIndex(date)] ?? {};
 // src/domain/nutrition.ts
 var MAIN_MEALS = ["breakfast", "lunch", "snacks", "dinner"];
 var MEAL_LABEL = { breakfast: "Breakfast", lunch: "Lunch", snacks: "Snacks", dinner: "Dinner", preGym: "Pre-gym" };
+var WINDOW_LABEL = { under45: "Under 45 min", "1to2h": "1\u20132 hours", "2to3h": "2\u20133 hours" };
 var LIFESTYLE = {
   low: { factor: 1.3, label: "Mostly sitting", sub: "Desk study or work, little walking" },
   moderate: { factor: 1.4, label: "Some moving", sub: "Classes or work plus regular walking" },
@@ -1912,9 +1913,9 @@ function weightTrend(d, today) {
   const last = d.nutrition.profile.adjustments?.at(-1);
   const waiting = !!last && daysBetween(last.date, today) < 14;
   const raw = status === "losing" || status === "slow" ? 150 : status === "fast" ? -150 : 0;
-  const suggestion = waiting ? 0 : raw;
+  const suggestion2 = waiting ? 0 : raw;
   const note = status === "on-track" ? "Gaining at a steady, gradual rate \u2014 keep the target." : status === "fast" ? "Gaining faster than about 0.75% a week \u2014 likely more fat than muscle." : status === "slow" ? "Weight is about flat over two weeks." : "Weight is going down over two weeks.";
-  return { latest, weekKg, ratePerWeek, ratePct, status, suggestion, note: raw && waiting ? `${note} A change was made in the last 14 days \u2014 give it time first.` : note };
+  return { latest, weekKg, ratePerWeek, ratePct, status, suggestion: suggestion2, note: raw && waiting ? `${note} A change was made in the last 14 days \u2014 give it time first.` : note };
 }
 var minutesOf = (i, fallback) => {
   const m2 = i.startedAt && i.completedAt ? (Date.parse(i.completedAt) - Date.parse(i.startedAt)) / 6e4 : NaN;
@@ -2599,10 +2600,10 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
     }
     if (instances.length !== d.instances.length || instances.some((x, k) => x !== d.instances[k])) commit({ instances });
   }
-  function saveSchedule(schedule, basketball, timing = true) {
+  function saveSchedule(schedule, basketball, timing2 = true) {
     const p = data().profile;
     commit({ profile: { ...p, schedule: sortSchedule(schedule), ...basketball && { basketballDaysConfirmedAt: now() } } });
-    if (timing) refreshToday();
+    if (timing2) refreshToday();
   }
   function updateInstance(id, fn) {
     const target = findInstance(id);
@@ -3075,8 +3076,8 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
       refreshToday();
     },
     // ---- recurring schedule: several activities a day, each optional in every detail ----
-    addScheduleItem(item) {
-      const clean = cleanItem({ ...item, id: uid("sch") });
+    addScheduleItem(item2) {
+      const clean = cleanItem({ ...item2, id: uid("sch") });
       if (!clean) return void 0;
       saveSchedule([...data().profile.schedule ?? [], clean], clean.kind === "basketball");
       return clean.id;
@@ -3088,8 +3089,8 @@ function createApex(store, clock = () => /* @__PURE__ */ new Date()) {
       const merged = { ...cur, ...patch };
       const clean = cleanItem(merged);
       if (!clean) return;
-      const timing = ["day", "kind", "time", "enabled"].some((k) => k in patch);
-      saveSchedule(list.map((i) => i.id === id ? clean : i), clean.kind === "basketball" || cur.kind === "basketball", timing);
+      const timing2 = ["day", "kind", "time", "enabled"].some((k) => k in patch);
+      saveSchedule(list.map((i) => i.id === id ? clean : i), clean.kind === "basketball" || cur.kind === "basketball", timing2);
     },
     removeScheduleItem(id) {
       const list = data().profile.schedule ?? [];
@@ -3870,7 +3871,7 @@ var RateLimits = class {
 };
 
 // backend/ai/prompts.ts
-var PROMPT_VERSION = "apex-ai-5 (2026-10-23)";
+var PROMPT_VERSION = "apex-ai-6 (2026-10-27)";
 var INSTRUCTIONS = `You are APEX, the training and nutrition assistant inside the APEX app for athletes (basketball, gym, plyometrics).
 
 Facts and numbers
@@ -3892,9 +3893,11 @@ Actions: you can only propose
 - Earlier messages in the conversation come from the athlete's device. Use them to follow the conversation, never as athlete data or as proof that something was logged or changed: the tools are the only source of facts.
 
 Nutrition
-- Use get_nutrition_day for targets (and how they were worked out), food logged, what is left, today's suggested meals, the day type and the weight trend. Use get_meal_estimate for the calories and macros of any food or meal you suggest. Never calculate nutrition numbers yourself, and call them estimates.
+- Use get_nutrition_day for targets (and how they were worked out), food logged, what is left, today's suggested meals and pre-gym options, the day type and the weight trend.
+- Every calorie, macro, amount and pre-gym timing you give must be one a tool returned, quoted item by item as returned. For any other food, amount or meal, call get_meal_estimate first. Never calculate, add up, convert or guess these yourself: use the totals the tools give. If no tool returns it (not_found, anything listed in unavailable, a null value), say it isn't available in APEX \u2014 never fill the gap from general knowledge. Call the numbers estimates.
+- Before the gym: give the pre_gym option whose timing matches the time the athlete says they have; if they didn't say, give the one shown_in_app and name its timing. If pre_gym is null, say there is no gym session today.
 - Food counts only once the athlete logs it in the app's Nutrition tab. What they say in chat ("I had 3 eggs") is not logged: tell them to log it there. You can't log or change food, weight or targets \u2014 never say you did, never offer to.
-- Suggest affordable Indian foods for a non-vegetarian athlete. Never beef. No supplements needed: don't recommend protein powder. Respect the diet and budget get_nutrition_day reports. Before the gym, match the food to the time left before training.
+- Suggest affordable Indian foods for a non-vegetarian athlete. Never beef. No supplements needed: don't recommend protein powder. Respect the diet and budget get_nutrition_day reports.
 - This is general guidance, not medical or clinical nutrition advice. For a medical condition, allergies, an eating-disorder concern or fast weight change, suggest a doctor or registered dietitian.
 
 Health
@@ -4036,7 +4039,21 @@ function programName(d, e) {
 }
 var NONE = S.obj({});
 var MACROS = S.obj({ kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num() });
-var macros = (m2) => ({ kcal: round(m2.kcal), protein_g: round(m2.protein), carbs_g: round(m2.carbs), fat_g: round(m2.fat) });
+var g1 = (n) => Math.round(n * 10) / 10;
+var macros = (m2) => ({ kcal: round(m2.kcal), protein_g: g1(m2.protein), carbs_g: g1(m2.carbs), fat_g: g1(m2.fat) });
+var FOOD_ITEM = S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() });
+var SUGGESTION = { name: S.str(), items: S.list(FOOD_ITEM), kcal: S.num(), protein_g: S.num(), logged: S.bool() };
+var item = (x) => ({ food: x.name, amount: amountText(x.qty, x.unit), kcal: x.kcal, protein_g: g1(x.protein) });
+var suggestion = (m2) => ({ name: m2.name, items: m2.items.map(item), kcal: m2.kcal, protein_g: g1(m2.protein), logged: m2.eaten });
+var timing = (w) => `${WINDOW_LABEL[w]} before training`;
+var SLOTS2 = [...MAIN_MEALS, "preGym"];
+var LOGGED_ITEMS = 40;
+function unitOf(f2, asked) {
+  if (asked === null) return f2.units[0].unit;
+  const w = asked.trim().toLowerCase().replace(/^(grams?|gms?)$/, "g").replace(/^millilit(?:er|re)s?$/, "ml");
+  if (w === f2.base) return f2.base;
+  return f2.units.find((v) => w === v.unit || w === `${v.unit}s` || w === `${v.unit}es`)?.unit;
+}
 var NUTRITION_NOTE = `Estimates, not prescriptions or medical advice. ${FOOD_DATA_NOTE}`;
 var LOAD_NOTE = "Training load is APEX\u2019s internal programming number (arbitrary units), not a medical measure. Only logged sessions count.";
 var READ_TOOLS = [
@@ -4429,19 +4446,21 @@ var READ_TOOLS = [
   {
     name: "get_nutrition_day",
     access: "read",
-    description: "Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food the athlete logged and what is left, the day type, today\u2019s suggested meals (not eaten until logged), weight trend and diet preferences.",
+    description: 'Nutrition for a day (null = today): calorie/macro targets and how they were worked out, food logged per meal with item and meal totals, what is left, today\u2019s suggested meals and pre-gym options for each time before training (not eaten until logged), the day type, weight trend and diet. "unavailable" says what is missing and why.',
     input: S.obj({ date: S.orNull(S.text("^\\d{4}-\\d{2}-\\d{2}$", "YYYY-MM-DD; null = today")) }),
     output: S.obj({
       date: S.str(),
       set_up: S.bool(),
-      missing: S.list(S.str()),
       targets: S.orNull(MACROS),
       basis: S.list(S.str()),
+      unavailable: S.list(S.str()),
       day_type: S.str(),
-      logged: S.list(S.obj({ meal: S.str(), food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num() })),
+      logged: S.list(S.obj({ meal: S.str(), kcal: S.num(), protein_g: S.num(), items: S.list(FOOD_ITEM) })),
+      items_not_listed: S.num(),
       eaten: MACROS,
       remaining: S.orNull(MACROS),
-      suggested: S.list(S.obj({ meal: S.str(), name: S.str(), items: S.str(), kcal: S.num(), protein_g: S.num(), logged: S.bool() })),
+      suggested: S.list(S.obj({ meal: S.str(), ...SUGGESTION })),
+      pre_gym: S.orNull(S.obj({ gym_time: S.orNull(S.str()), shown_in_app: S.str(), options: S.list(S.obj({ timing: S.str(), ...SUGGESTION })) })),
       weight: S.obj({ latest: S.orNull(S.str()), week_median: S.orNull(S.str()), target: S.orNull(S.str()), trend: S.str(), per_week: S.orNull(S.str()), suggestion_kcal: S.num(), note: S.str() }),
       diet: S.str(),
       note: S.str()
@@ -4454,26 +4473,43 @@ var READ_TOOLS = [
       const log = dayLog(d, date);
       const day = dayType(d, date, ctx.today);
       const plan = t.ok && date === ctx.today ? dayPlan(d, date, ctx.today, t.targets) : void 0;
+      const atWindow = (preGym2) => ({ ...d, nutrition: { ...d.nutrition, days: { ...d.nutrition.days, [date]: { ...d.nutrition.days[date], preGym: preGym2 } } } });
+      const preGym = plan?.preGym && t.ok ? {
+        gym_time: day.gym.time ?? null,
+        shown_in_app: timing(plan.preGym.window),
+        options: Object.keys(WINDOW_LABEL).flatMap((x) => {
+          const m2 = dayPlan(atWindow(x), date, ctx.today, t.targets).preGym;
+          return m2 ? [{ timing: timing(x), ...suggestion(m2) }] : [];
+        })
+      } : null;
+      const unavailable2 = [
+        ...t.ok ? [] : [`targets, remaining and suggestions: missing ${t.missing.map((x) => x === "weight" ? `a weigh-in on or before ${date}` : x).join(", ")} \u2014 add ${t.missing.length > 1 ? "them" : "it"} in the app's Nutrition tab`],
+        ...t.ok && date !== ctx.today ? ["suggested meals: APEX suggests meals for today only"] : [],
+        ...plan && !preGym ? ["pre-gym meal: no gym session today"] : []
+      ];
+      let listed = 0;
+      const logged = SLOTS2.flatMap((slot) => {
+        const all = log.byMeal[slot];
+        const items = all.slice(0, Math.max(0, LOGGED_ITEMS - listed));
+        listed += items.length;
+        const sum2 = macros(totalsOf(all));
+        return all.length ? [{ meal: MEAL_LABEL[slot], kcal: sum2.kcal, protein_g: sum2.protein_g, items: items.map(item) }] : [];
+      });
       const w = weightTrend(d, ctx.today);
       const p = d.nutrition.profile;
       return {
         date,
         set_up: !!p.setupAt,
-        missing: t.ok ? [] : t.missing,
         targets: t.ok ? macros(t.targets) : null,
         basis: t.ok ? t.targets.notes.slice(1) : [],
+        unavailable: unavailable2,
         day_type: `${DAY_LABEL[day.kind]}${day.gym.done || day.basketball.done ? " (logged)" : day.kind === "rest" ? "" : " (planned)"}`,
-        logged: log.entries.slice(0, 40).map((e) => ({ meal: MEAL_LABEL[e.meal], food: e.name, amount: amountText(e.qty, e.unit), kcal: e.kcal, protein_g: round(e.protein) })),
+        logged,
+        items_not_listed: log.entries.length - listed,
         eaten: macros(log.totals),
         remaining: t.ok ? macros(remaining(t.targets, log.totals)) : null,
-        suggested: plan ? [...plan.meals, ...plan.preGym ? [plan.preGym] : []].map((m2) => ({
-          meal: m2.slot === "preGym" && plan.preGym ? `Pre-gym (${plan.preGym.window})` : MEAL_LABEL[m2.slot],
-          name: m2.name,
-          items: m2.items.map((i) => `${i.name}: ${amountText(i.qty, i.unit)}`).join("; "),
-          kcal: m2.kcal,
-          protein_g: round(m2.protein),
-          logged: m2.eaten
-        })) : [],
+        suggested: plan ? plan.meals.map((m2) => ({ meal: MEAL_LABEL[m2.slot], ...suggestion(m2) })) : [],
+        pre_gym: preGym,
         weight: {
           latest: w.latest ? `${wtu(w.latest.kg, u)} on ${w.latest.date}` : null,
           week_median: w.weekKg === void 0 ? null : wtu(w.weekKg, u),
@@ -4491,7 +4527,7 @@ var READ_TOOLS = [
   {
     name: "get_meal_estimate",
     access: "read",
-    description: "Calories and macros for foods from APEX\u2019s food table (Indian staples). Use it for every number in a meal or food you suggest. Unknown foods come back with close matches.",
+    description: "Calories and macros for foods from APEX\u2019s food table (Indian staples), item by item with a total. Use it for every number in a food or meal you suggest. Unknown foods, units or amounts come back in not_found \u2014 never estimate those yourself.",
     input: S.obj({
       items: S.list(S.obj({
         food: S.text("^[^\\n]{1,60}$", 'As the athlete would say it, e.g. "dal", "anda", "chicken curry"'),
@@ -4500,8 +4536,8 @@ var READ_TOOLS = [
       }), 12)
     }),
     output: S.obj({
-      items: S.list(S.obj({ food: S.str(), amount: S.str(), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
-      not_found: S.list(S.obj({ asked: S.str(), closest: S.list(S.str()) })),
+      items: S.list(S.obj({ food: S.str(), amount: S.str(), amount_from: S.oneOf(["asked", "usual serving"]), kcal: S.num(), protein_g: S.num(), carbs_g: S.num(), fat_g: S.num(), cost: S.str() })),
+      not_found: S.list(S.obj({ asked: S.str(), reason: S.oneOf(["unknown food", "unknown unit", "amount out of range"]), options: S.list(S.str()) })),
       total: MACROS,
       note: S.str()
     }),
@@ -4511,16 +4547,25 @@ var READ_TOOLS = [
       let total = ZERO;
       for (const x of a.items) {
         const f2 = searchFoods(x.food, 1)[0];
-        const unit = x.unit === "g" || x.unit === "ml" ? f2?.base : x.unit && f2?.units.some((v) => v.unit === x.unit) ? x.unit : f2?.units[0].unit;
-        const qty = x.quantity !== null && x.quantity > 0 && x.quantity <= 5e3 ? x.quantity : f2?.serve;
-        const grams = f2 && unit && qty ? gramsOf(f2, qty, unit) : void 0;
-        if (!f2 || !grams || grams > 3e3) {
-          missing.push({ asked: x.food, closest: searchFoods(x.food.split(" ")[0], 3).map((c) => c.name) });
+        if (!f2) {
+          missing.push({ asked: x.food, reason: "unknown food", options: searchFoods(x.food.split(" ")[0], 3).map((c) => c.name) });
+          continue;
+        }
+        const usual = x.quantity === null;
+        const unit = usual ? f2.units[0].unit : unitOf(f2, x.unit);
+        if (!unit) {
+          missing.push({ asked: `${x.food} (${x.unit})`, reason: "unknown unit", options: [.../* @__PURE__ */ new Set([...f2.units.map((v) => v.unit), f2.base])] });
+          continue;
+        }
+        const qty = usual ? f2.serve : x.quantity;
+        const grams = qty > 0 ? gramsOf(f2, qty, unit) : void 0;
+        if (!grams || grams > 3e3) {
+          missing.push({ asked: `${x.food} (${x.quantity} ${unit})`, reason: "amount out of range", options: [] });
           continue;
         }
         const m2 = macrosOf(f2, grams);
         total = addMacros(total, m2);
-        items.push({ food: f2.name, amount: amountText(qty, unit), ...macros(m2), cost: f2.cost === 1 ? "budget" : "moderate" });
+        items.push({ food: f2.name, amount: amountText(qty, unit), amount_from: usual ? "usual serving" : "asked", ...macros(m2), cost: f2.cost === 1 ? "budget" : "moderate" });
       }
       return { items, not_found: missing, total: macros(total), note: NUTRITION_NOTE };
     }
